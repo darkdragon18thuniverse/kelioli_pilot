@@ -1,0 +1,51 @@
+# ==========================================
+# 1. PYTHON RUNTIME & BYTECODE RESIDUE
+# ==========================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ==========================================
+# 2. LOCAL DATA STORAGE & TRANSIENT DB FILES
+# ==========================================
+# Keep the application codebase pure; never commit the active operational DB instances
+src/app/production.db
+src/app/production.db-wal
+src/app/production.db-shm
+
+# Target generic local databases if any extra testing nodes crop up
+*.db
+*.sqlite3
+
+# ==========================================
+# 3. ENVIRONMENT & PACKAGING CONFIGURATIONS
+# ==========================================
+# Ignore the active virtual environment created by uv
+.venv/
+venv/
+ENV/
+*.env*
+
+# ==========================================
+# 4. SYSTEM SPECIFIC & IDE CONFIGURATIONS
+# ==========================================
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*test.csv
+resetdb.py
+parameters.csv
+curltester.md
+*db_script.sql
+
+# ==========================================
+# 5. TRANSIENT USER FILES / UPLOADS LOGS
+# ==========================================
+# Keeps your workspace data distinct from operational logs
+*.log

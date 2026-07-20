@@ -1,0 +1,9 @@
+#,Parameter,Category,What LLM Checks
+1,Cost Communication,CRITICAL,Agent must not quote a fixed price. Only ₹3.8L–6.8L range is acceptable. Flag any single fixed figure.
+2,Procedure Timeline,CRITICAL,"Temp teeth within 5–6 days. Permanent teeth after 4–6 months (~6 months). Flag shorter claims. Also check if agent explained this to patient."
+3,Procedure Description,MAJOR,"Agent must state: existing teeth removed → titanium screws placed in jawbone → fixed bridge fitted. Must clarify it is not removable."
+4,Chennai Stay,MAJOR,Agent must mention 5–7 day stay. Flag if not communicated or if wrong duration stated.
+5,Opening,MAJOR,Agent must collect name age and city. Must introduce Best Laser Medical Group by name.
+6,Cost / EMI Handling,MAJOR,"Conditional — only evaluate if patient raised cost or quality concerns. Agent must mention EMI (Bajaj Finance) and clarify insurance does not cover implants in India."
+7,Closing,MAJOR,"Agent must give a clear next step, offer a specific appointment time, share WhatsApp contact or clinic address, and set a follow-up reminder before ending the call."
+8,Patient Questions Handled,MINOR,Check if all questions or concerns raised by the patient were answered properly and satisfactorily during the call.
