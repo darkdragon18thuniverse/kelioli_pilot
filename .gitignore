@@ -39,10 +39,8 @@ ENV/
 *.swp
 *.swo
 *test.csv
-resetdb.py
 parameters.csv
 curltester.md
-*db_script.sql
 
 # ==========================================
 # 5. TRANSIENT USER FILES / UPLOADS LOGS

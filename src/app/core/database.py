@@ -2,20 +2,20 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
+from src.app.models.base import DatabaseManager
 
 # Define strict filesystem anchors relative to execution
 BASE_DIR = Path(__file__).resolve().parent.parent
-DB_FILE_PATH = BASE_DIR / "production.db"
 SCHEMA_SCRIPT_PATH = BASE_DIR / "models" / "scripts" / "db_script.sql"
 
 
 def get_raw_connection() -> sqlite3.Connection:
     """
-    Establishes a base connection to the SQLite file, configuring 
-    isolation settings, row mappings, and explicit foreign key boundaries.
+    Establishes a base connection to the SQLite file dynamically respecting
+    DatabaseManager.get_db_path() for test environment isolation.
     """
     conn = sqlite3.connect(
-        str(DB_FILE_PATH),
+        DatabaseManager.get_db_path(),
         detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
         timeout=30.0  
     )
@@ -26,7 +26,7 @@ def get_raw_connection() -> sqlite3.Connection:
 
 def init_database() -> None:
     """
-    Standard production bootstrapping sequence. Safely constructs the multi-tenant
+    Standard production/test bootstrapping sequence. Safely constructs the multi-tenant
     schema architecture only if tables do not already exist.
     """
     if not SCHEMA_SCRIPT_PATH.exists():
@@ -36,7 +36,6 @@ def init_database() -> None:
 
     conn = get_raw_connection()
     try:
-        # Enforce WAL mode for concurrent execution capacity
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
         
@@ -55,8 +54,7 @@ def init_database() -> None:
 @contextmanager
 def get_db() -> Generator[sqlite3.Connection, None, None]:
     """
-    Yields a clean database connection transaction block with automatic context 
-    management, standardizing commits and fallback rollouts.
+    Yields a clean database connection transaction block with automatic context management.
     """
     conn = get_raw_connection()
     try:

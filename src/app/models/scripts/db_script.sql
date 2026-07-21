@@ -15,6 +15,13 @@ CREATE TABLE IF NOT EXISTS roles (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Seed System Standard Roles
+INSERT OR IGNORE INTO roles (id, name, description) VALUES 
+(1, 'superadmin', 'Global System Administrator'),
+(2, 'admin', 'Organisation Administrator'),
+(3, 'manager', 'Department Manager'),
+(4, 'agent', 'Operational Telephony Agent');
+
 -- ==========================================
 -- 2. CORE SYSTEM INFRASTRUCTURE & MULTI-TENANCY
 -- ==========================================

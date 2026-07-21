@@ -3,14 +3,18 @@ import os
 import sys
 from pathlib import Path
 
-# Align project path variables to easily reach inside the app core folder
-ROOT_DIR = Path(__file__).resolve().parent
+# Align project path variables to resolve imports from the project root directory
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = SCRIPT_DIR.parent
 DB_PATH = ROOT_DIR / "src" / "app" / "production.db"
+
+# Force Python to look at the project root folder for imports
+sys.path.append(str(ROOT_DIR))
 
 def manual_nuke_and_reset():
     print("⚠️  MANUAL DATABASE RESET INITIATED")
     
-    # 1. Target and remove the active files
+    # 1. Target and remove the active database and logging journal files
     targets = [
         DB_PATH,
         Path(f"{DB_PATH}-wal"),
@@ -28,8 +32,7 @@ def manual_nuke_and_reset():
 
     print("✨ Environment cleared.")
     
-    # 2. Add local pathing context to call production initializer cleanly
-    sys.path.append(str(ROOT_DIR / "src"))
+    # 2. Import structural initializer from core database utilities
     from src.app.core.database import init_database
     
     try:
