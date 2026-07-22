@@ -21,7 +21,7 @@ class User:
 
     @staticmethod
     def create(role_id: int, organization_id: Optional[int], department_id: Optional[int], 
-               name: str, email: str, password_raw: str) -> int:
+               name: str, email: str, password_raw: str, status: str = "active") -> int:
         """
         Creates a user account. Enforces structural constraints based on role mappings.
         If a user with this email exists in a non-active state, it reactivates them and updates settings.
@@ -53,12 +53,12 @@ class User:
                 update_query = """
                     UPDATE users 
                     SET role_id = ?, organization_id = ?, department_id = ?, 
-                        name = ?, password_hash = ?, status = 'active'
+                        name = ?, password_hash = ?, status = ?
                     WHERE id = ?;
                 """
                 DatabaseManager.execute_update(
                     update_query, 
-                    (role_id, organization_id, department_id, name.strip(), pwd_hash, existing["id"])
+                    (role_id, organization_id, department_id, name.strip(), pwd_hash, status, existing["id"])
                 )
                 return existing["id"]
             else:
@@ -66,12 +66,12 @@ class User:
 
         # 3. Fresh Record Insertion
         insert_query = """
-            INSERT INTO users (role_id, organization_id, department_id, name, email, password_hash)
-            VALUES (?, ?, ?, ?, ?, ?);
+            INSERT INTO users (role_id, organization_id, department_id, name, email, password_hash, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
         """
         return DatabaseManager.execute_update(
             insert_query, 
-            (role_id, organization_id, department_id, name.strip(), email_clean, pwd_hash)
+            (role_id, organization_id, department_id, name.strip(), email_clean, pwd_hash, status)
         )
 
     @staticmethod
@@ -172,3 +172,9 @@ class User:
     def soft_delete(user_id: int) -> bool:
         """Toggles user status to 'suspended' to safely maintain historical record continuity."""
         return DatabaseManager.execute_update("UPDATE users SET status = 'suspended' WHERE id = ?;", (user_id,)) > 0
+
+    @staticmethod
+    def suspend_by_department(department_id: int) -> int:
+        """Suspends all user accounts assigned to a specific department."""
+        query = "UPDATE users SET status = 'suspended', updated_at = CURRENT_TIMESTAMP WHERE department_id = ?;"
+        return DatabaseManager.execute_update(query, (department_id,))

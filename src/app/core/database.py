@@ -3,6 +3,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
 from src.app.models.base import DatabaseManager
+from src.app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # Define strict filesystem anchors relative to execution
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -30,10 +33,12 @@ def init_database() -> None:
     schema architecture only if tables do not already exist.
     """
     if not SCHEMA_SCRIPT_PATH.exists():
-        raise FileNotFoundError(
-            f"Database initialization aborted: Master schema script not found at {SCHEMA_SCRIPT_PATH}"
-        )
+        err_msg = f"Database initialization aborted: Master schema script not found at {SCHEMA_SCRIPT_PATH}"
+        logger.error(err_msg)
+        raise FileNotFoundError(err_msg)
 
+    db_path = DatabaseManager.get_db_path()
+    logger.info(f"Initializing database at path: '{db_path}' with schema script: '{SCHEMA_SCRIPT_PATH.name}'")
     conn = get_raw_connection()
     try:
         conn.execute("PRAGMA journal_mode = WAL;")
@@ -44,8 +49,10 @@ def init_database() -> None:
             
         conn.executescript(schema_sql)
         conn.commit()
+        logger.info("Database schema initialized and bootstrapped successfully.")
     except sqlite3.Error as e:
         conn.rollback()
+        logger.exception(f"Database initialization failed due to SQLite error: {e}")
         raise e
     finally:
         conn.close()

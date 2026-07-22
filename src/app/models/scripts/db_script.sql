@@ -35,8 +35,9 @@ CREATE TABLE IF NOT EXISTS organizations (
     billing_email TEXT,
     
     -- Dynamic Multi-Tier AI Service Tier Engines Routing Nodes
-    stt_model_routing TEXT NOT NULL DEFAULT 'sarvam-2',         
-    llm_model_routing TEXT NOT NULL DEFAULT 'google/gemini-2.5-flash-lite', 
+    stt_model_routing TEXT NOT NULL DEFAULT 'saaras:v3',         
+    llm_model_routing TEXT NOT NULL DEFAULT 'openrouter/free',
+    company_context TEXT DEFAULT NULL, 
     default_language TEXT DEFAULT NULL,
     
     -- Pricing & Safeguard Boundaries
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS departments (
     name TEXT NOT NULL,                          
     slug TEXT NOT NULL,                          
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+    department_context TEXT DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
@@ -84,14 +86,14 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS compliance_parameters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     organization_id INTEGER NOT NULL,            
-    department_id INTEGER,                       
+    department_id INTEGER NOT NULL,              
     parameter_name TEXT NOT NULL,                 
     rule_description TEXT NOT NULL,               
-    severity_level TEXT NOT NULL DEFAULT 'medium' CHECK (severity_level IN ('low', 'medium', 'critical')),
+    severity_level TEXT NOT NULL DEFAULT 'medium' CHECK (severity_level IN ('low', 'medium', 'high', 'critical')),
     is_active INTEGER DEFAULT 1 CHECK (is_active IN (0, 1)),                  
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
-    FOREIGN KEY(department_id) REFERENCES departments(id) ON DELETE SET NULL
+    FOREIGN KEY(department_id) REFERENCES departments(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS csv_uploads (
@@ -99,6 +101,7 @@ CREATE TABLE IF NOT EXISTS csv_uploads (
     organization_id INTEGER NOT NULL,
     user_id INTEGER,                            -- Operator who triggered the ingestion batch
     filename TEXT NOT NULL,
+    file_hash TEXT,
     total_records INTEGER DEFAULT 0,
     processed_records INTEGER DEFAULT 0,
     failed_records INTEGER DEFAULT 0,
@@ -206,6 +209,7 @@ CREATE INDEX IF NOT EXISTS idx_calls_user_id ON calls(user_id);
 CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(processing_status);
 CREATE INDEX IF NOT EXISTS idx_evaluations_call_id ON call_evaluations(call_id);
 CREATE INDEX IF NOT EXISTS idx_daily_metrics_lookup ON daily_usage_metrics(organization_id, usage_date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_csv_uploads_org_hash ON csv_uploads(organization_id, file_hash);
 
 -- ==========================================
 -- 7. AUTOMATIC UPDATED_AT TIMESTAMP TRIGGERS

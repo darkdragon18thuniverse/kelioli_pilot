@@ -1,63 +1,128 @@
 import os
-import httpx
-from sarvamai import SarvamAI
+import time
+from src.app.core.logging_config import get_logger
 
-TMP_DIR = "/tmp"
-os.makedirs(TMP_DIR, exist_ok=True)
+logger = get_logger(__name__)
 
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
-if not SARVAM_API_KEY:
-    raise RuntimeError("CRITICAL: SARVAM_API_KEY environment variable is not set")
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
+BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", 2.0))
 
-SARVAM_CLIENT = SarvamAI(api_subscription_key=SARVAM_API_KEY)
 
-import httpx
+def retry_with_backoff(func):
+    def wrapper(*args, **kwargs):
+        retries = 0
+        while retries < MAX_RETRIES:
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                retries += 1
+                sleep_time = BACKOFF_FACTOR ** retries
+                logger.warning(f"External API call failed ({e}). Attempt {retries}/{MAX_RETRIES}. Retrying in {sleep_time}s...")
+                if retries >= MAX_RETRIES:
+                    logger.error(f"External API call failed permanently after {MAX_RETRIES} attempts.")
+                    raise
+                time.sleep(sleep_time)
+    return wrapper
 
-def download_and_transcribe_call(url: str, client: httpx.Client) -> str:
-    """
-    TEMPORARY MOCK FOR DEVELOPMENT
-    Bypasses live downloads and Sarvam AI processing to return a structural response.
-    Uncomment original implementation when ready for production.
-    """
-    # Returns a hardcoded sample matching your exact expected structure
-    return (
-        "ஹலோ, ஹலோ, இங்க ஆசிரி எங்கங்க இருக்கு? அம்மா இது சென்னைங்கம்மா, "
-        "சென்னையில வளசர பக்கமா. நீங்க எங்க இருந்தும்மா பேசுறீங்க? நாங்க "
-        "கும்பவாட்சியிலிருந்து பேசுறோமா? சொல்லுங்கம்மா, என்ன தகவல் வேணுங்கம்மா? "
-        "இல்ல பல்லு சுத்தமா இல்ல, எல்லாம் விழுந்துருச்சு. ஓகேம்மா. அம்மா நான் "
-        "உங்களுக்கு இங்க கோயம்புத்தூர் உங்கள் திரும்ப நான் கூப்பிடுறேம்மா இப்போ. ம் சரி."
-    )
-    #uncomment for prod
-# def download_and_transcribe_call(url: str, client: httpx.Client) -> str:
-    """Sequentially downloads an audio file link and requests an English-Indian transcription."""
-    filename = os.path.basename(url.split("?")[0])
-    if not filename.endswith((".mp3", ".wav")):
-        filename = f"audio_{hash(url)}.mp3"
-    dest_path = os.path.join(TMP_DIR, filename)
 
-    try:
-        # 1. Download tracking streams
-        with client.stream("GET", url) as response:
-            if response.status_code != 200:
-                raise httpx.HTTPStatusError(
-                    f"HTTP {response.status_code}", 
-                    request=response.request, 
-                    response=response
-                )
-            
-            with open(dest_path, "wb") as f:
-                for chunk in response.iter_bytes(chunk_size=16384):
-                    f.write(chunk)
+class STTService:
+    @staticmethod
+    @retry_with_backoff
+    def transcribe(file_path: str) -> Dict[str, Any]:
+        api_key = os.getenv("SARVAM_API_KEY")
+        if not api_key or api_key == "mock_key":
+            logger.warning("SARVAM_API_KEY is not configured with a valid live production key.")
+            raise ValueError("SARVAM_API_KEY is not configured with a valid live production key.")
 
-        # 2. Extract transcription analytics string
-        with open(dest_path, "rb") as audio_file:
-            sarvam_response = SARVAM_CLIENT.speech_to_text.transcribe(
-                file=audio_file,
-                model="saaras:v3",
-                mode="transcribe",
-            )
-        return sarvam_response.transcript
+        if not os.path.exists(file_path):
+            logger.error(f"Audio file for STT not found: {file_path}")
+            raise FileNotFoundError(f"Audio file not found at path: {file_path}")
 
-    finally:
-        if os.path.exists(dest_path):
-            os.remove(dest_path)
+        url = "https://api.sarvam.ai/speech-to-text"
+        headers = {"api-subscription-key": api_key}
+        logger.info(f"Initiating Sarvam STT transcription for file: {file_path}")
+        
+        start_time = time.perf_counter()
+        with open(file_path, "rb") as f:
+            files = {"file": (os.path.basename(file_path), f, "audio/wav")}
+            data = {"model": "saaras:v3", "mode": "transcribe"}
+            with httpx.Client(timeout=60.0) as client:
+                res = client.post(url, headers=headers, files=files, data=data)
+                res.raise_for_status()
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                logger.info(f"Sarvam STT transcription completed successfully in {elapsed_ms:.2f}ms")
+                return res.json()
+
+
+class LLMService:
+    @staticmethod
+    @retry_with_backoff
+    def evaluate(model: str, company_context: str, department_context: str, 
+                 parameters: list, transcript: str) -> Dict[str, Any]:
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key or api_key == "mock_key":
+            logger.warning("OPENROUTER_API_KEY is not configured with a valid live production key.")
+            raise ValueError("OPENROUTER_API_KEY is not configured with a valid live production key.")
+
+        selected_model = model or "openrouter/free"
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}", 
+            "Content-Type": "application/json"
+        }
+        
+        system_prompt = (
+            f"You are an expert compliance auditor.\n"
+            f"Company Context: {company_context or 'N/A'}\n"
+            f"Department Context: {department_context or 'N/A'}\n"
+            f"Evaluate the transcript strictly against the parameters and output valid JSON matching the schema."
+        )
+        user_content = f"Parameters: {json.dumps(parameters)}\n\nTranscript: {transcript}"
+
+        payload = {
+            "model": selected_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "eval_schema",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "procedure_enquired": {"type": "string"},
+                            "evaluations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "parameter_id": {"type": "integer"},
+                                        "did_follow_rule": {"type": "integer", "enum": [0, 1]},
+                                        "failure_offset_seconds": {"type": ["integer", "null"]},
+                                        "failure_reason": {"type": ["string", "null"]}
+                                    },
+                                    "required": ["parameter_id", "did_follow_rule", "failure_offset_seconds", "failure_reason"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": ["procedure_enquired", "evaluations"],
+                        "additionalProperties": False
+                    }
+                }
+            }
+        }
+
+        logger.info(f"Initiating OpenRouter LLM compliance evaluation using model '{selected_model}' across {len(parameters)} rules.")
+        start_time = time.perf_counter()
+        with httpx.Client(timeout=60.0) as client:
+            res = client.post(url, headers=headers, json=payload)
+            res.raise_for_status()
+            response_data = res.json()
+            content_str = response_data["choices"][0]["message"]["content"]
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            logger.info(f"OpenRouter LLM evaluation completed successfully in {elapsed_ms:.2f}ms")
+            return json.loads(content_str)

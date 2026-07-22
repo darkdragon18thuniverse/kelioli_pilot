@@ -1,4 +1,5 @@
-from typing import Optional, List, sqlite3
+import sqlite3
+from typing import Optional, List
 from src.app.models.base import DatabaseManager
 
 class CSVUpload:
