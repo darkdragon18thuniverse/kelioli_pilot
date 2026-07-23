@@ -113,12 +113,24 @@ class CallsController:
         active_params = [dict(p) for p in raw_params if p["is_active"] == 1] if raw_params else []
         logger.info(f"Pipeline Execution: Running LLM evaluation against {len(active_params)} active compliance parameters for call_id={call_id}")
 
+        # Only send the fields the LLM actually needs to evaluate + echo back parameter_id.
+        # Avoids leaking organization_id/department_id/is_active/created_at into the prompt.
+        llm_params = [
+            {
+                "id": p["id"],
+                "parameter_name": p["parameter_name"],
+                "rule_description": p["rule_description"],
+                "severity_level": p["severity_level"]
+            }
+            for p in active_params
+        ]
+
         llm_model = org["llm_model_routing"] or "openrouter/free"
         evaluation_result = LLMService.evaluate(
             model=llm_model,
             company_context=org["company_context"],
             department_context=dept["department_context"],
-            parameters=active_params,
+            parameters=llm_params,
             transcript=transcript
         )
         procedure_enquired = evaluation_result.get("procedure_enquired", "General Inquiry")
@@ -137,7 +149,7 @@ class CallsController:
                 "call_id": call_id,
                 "parameter_id": item["parameter_id"],
                 "did_follow_rule": item["did_follow_rule"],
-                "failure_offset_seconds": item.get("failure_offset_seconds"),
+                "failure_offset_seconds": None,  # STT provides transcript only, no timestamps to base this on
                 "failure_reason": item.get("failure_reason"),
                 "parameter_snapshot_text": snapshot_text
             })
