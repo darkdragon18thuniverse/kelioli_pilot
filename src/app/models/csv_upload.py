@@ -64,7 +64,14 @@ class CSVUpload:
         return DatabaseManager.execute_update(query, (target_status, upload_id)) > 0
 
     @staticmethod
-    def list_by_organization(organization_id: int) -> List[sqlite3.Row]:
+    def list_by_organization(organization_id: int, user_id: Optional[int] = None) -> List[sqlite3.Row]:
         """Retrieve historical upload batch records for an organization dashboard."""
-        query = "SELECT * FROM csv_uploads WHERE organization_id = ? ORDER BY id DESC;"
-        return DatabaseManager.execute_query(query, (organization_id,))
+        query = "SELECT * FROM csv_uploads WHERE organization_id = ?"
+        params = [organization_id]
+
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(user_id)
+
+        query += " ORDER BY id DESC;"
+        return DatabaseManager.execute_query(query, tuple(params))

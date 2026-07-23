@@ -40,9 +40,12 @@ def test_csv_batch_processes_valid_rows_with_mocked_ai(client):
     )
     assert res.status_code == status.HTTP_202_ACCEPTED
     data = res.json()
-    assert data["processed_records"] == 1
+    assert data["processed_records"] == 0
     assert data["failed_records"] == 0
-    assert data["batch_status"] == "completed"
+    assert data["batch_status"] == "processing"
+
+    from src.app.services.call_queue_worker import process_next_pending_call
+    process_next_pending_call()
 
 
 def test_csv_batch_row_missing_department_fails_without_silent_fallback(client):
@@ -61,6 +64,7 @@ def test_csv_batch_row_missing_department_fails_without_silent_fallback(client):
     data = res.json()
     assert data["processed_records"] == 0
     assert data["failed_records"] == 1
+    assert data["batch_status"] == "failed"
 
 
 def test_csv_batch_duplicate_file_hash_rejected(client):
@@ -107,6 +111,7 @@ def test_csv_batch_manager_cannot_process_rows_outside_own_department(client):
     data = res.json()
     assert data["processed_records"] == 0
     assert data["failed_records"] == 1
+    assert data["batch_status"] == "failed"
 
 
 def test_list_csv_uploads_and_detail_success(client):
@@ -121,6 +126,9 @@ def test_list_csv_uploads_and_detail_success(client):
     )
     assert process_res.status_code == status.HTTP_202_ACCEPTED
     upload_id = process_res.json()["csv_upload_id"]
+
+    from src.app.services.call_queue_worker import process_next_pending_call
+    process_next_pending_call()
 
     # Test GET /api/v1/csv-uploads
     list_res = client.get(
@@ -216,5 +224,126 @@ def test_csv_uploads_not_found_handling(client):
         headers={"Authorization": f"Bearer {super_token}"}
     )
     assert res_detail.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_csv_uploads_user_self_scoping(client):
+    """
+    Verifies that GET /api/v1/csv-uploads is self-scoped by uploader for Admin, Manager, and Agent:
+    - Manager A receives only Manager A's upload rows.
+    - Manager B receives only Manager B's upload rows.
+    - Agent A receives only Agent A's upload rows.
+    - Tenant Admin receives only Tenant Admin's upload rows.
+    - Superadmin receives all upload rows within the org.
+    """
+    org_id = Organization.create(name="Self Scope Org", slug="self-scope-org")
+    dept_a = Department.create(organization_id=org_id, name="Dept A", slug="dept-a")
+    dept_b = Department.create(organization_id=org_id, name="Dept B", slug="dept-b")
+
+    ComplianceParameter.create(
+        organization_id=org_id, department_id=dept_a,
+        parameter_name="Check Name", rule_description="Rule A", severity_level="medium"
+    )
+    ComplianceParameter.create(
+        organization_id=org_id, department_id=dept_b,
+        parameter_name="Check Name", rule_description="Rule B", severity_level="medium"
+    )
+
+    # Provision Superadmin
+    User.create(
+        role_id=1, organization_id=None, department_id=None,
+        name="Super Admin Scope", email="super_scope@test.com", password_raw="Password2026!"
+    )
+    super_token = client.post("/api/v1/auth/login", data={"username": "super_scope@test.com", "password": "Password2026!"}).json()["access_token"]
+
+    # Provision Admin (Org Admin)
+    User.create(
+        role_id=2, organization_id=org_id, department_id=None,
+        name="Org Admin", email="orgadmin_scope@test.com", password_raw="Password2026!"
+    )
+    admin_token = client.post("/api/v1/auth/login", data={"username": "orgadmin_scope@test.com", "password": "Password2026!"}).json()["access_token"]
+
+    # Provision Manager A (Dept A)
+    User.create(
+        role_id=3, organization_id=org_id, department_id=dept_a,
+        name="Manager A", email="manager_a@test.com", password_raw="Password2026!"
+    )
+    mgr_a_token = client.post("/api/v1/auth/login", data={"username": "manager_a@test.com", "password": "Password2026!"}).json()["access_token"]
+
+    # Provision Manager B (Dept B)
+    User.create(
+        role_id=3, organization_id=org_id, department_id=dept_b,
+        name="Manager B", email="manager_b@test.com", password_raw="Password2026!"
+    )
+    mgr_b_token = client.post("/api/v1/auth/login", data={"username": "manager_b@test.com", "password": "Password2026!"}).json()["access_token"]
+
+    # Provision Agent A (Dept A)
+    User.create(
+        role_id=4, organization_id=org_id, department_id=dept_a,
+        name="Agent A", email="agent_a@test.com", password_raw="Password2026!"
+    )
+    agent_a_token = client.post("/api/v1/auth/login", data={"username": "agent_a@test.com", "password": "Password2026!"}).json()["access_token"]
+
+    # 1. Upload CSV by Manager A
+    csv_a = f"organization_id,department_id,user_id,audio_url\n{org_id},{dept_a},,audio_a.wav\n"
+    res_a = client.post(
+        "/api/v1/calls/process-csv",
+        files={"file": ("batch_a.csv", io.BytesIO(csv_a.encode("utf-8")), "text/csv")},
+        headers={"Authorization": f"Bearer {mgr_a_token}"}
+    )
+    assert res_a.status_code == status.HTTP_202_ACCEPTED
+    upload_a_id = res_a.json()["csv_upload_id"]
+
+    # 2. Upload CSV by Manager B
+    csv_b = f"organization_id,department_id,user_id,audio_url\n{org_id},{dept_b},,audio_b.wav\n"
+    res_b = client.post(
+        "/api/v1/calls/process-csv",
+        files={"file": ("batch_b.csv", io.BytesIO(csv_b.encode("utf-8")), "text/csv")},
+        headers={"Authorization": f"Bearer {mgr_b_token}"}
+    )
+    assert res_b.status_code == status.HTTP_202_ACCEPTED
+    upload_b_id = res_b.json()["csv_upload_id"]
+
+    # 3. Upload CSV by Admin
+    csv_admin = f"organization_id,department_id,user_id,audio_url\n{org_id},{dept_a},,audio_admin.wav\n"
+    res_admin = client.post(
+        "/api/v1/calls/process-csv",
+        files={"file": ("batch_admin.csv", io.BytesIO(csv_admin.encode("utf-8")), "text/csv")},
+        headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert res_admin.status_code == status.HTTP_202_ACCEPTED
+    upload_admin_id = res_admin.json()["csv_upload_id"]
+
+    # Assert Manager A lists CSV uploads -> sees ONLY batch_a.csv
+    list_mgr_a = client.get(f"/api/v1/csv-uploads?organization_id={org_id}", headers={"Authorization": f"Bearer {mgr_a_token}"})
+    assert list_mgr_a.status_code == status.HTTP_200_OK
+    items_a = list_mgr_a.json()["csv_uploads"]
+    assert len(items_a) == 1
+    assert items_a[0]["id"] == upload_a_id
+
+    # Assert Manager B lists CSV uploads -> sees ONLY batch_b.csv
+    list_mgr_b = client.get(f"/api/v1/csv-uploads?organization_id={org_id}", headers={"Authorization": f"Bearer {mgr_b_token}"})
+    assert list_mgr_b.status_code == status.HTTP_200_OK
+    items_b = list_mgr_b.json()["csv_uploads"]
+    assert len(items_b) == 1
+    assert items_b[0]["id"] == upload_b_id
+
+    # Assert Agent A lists CSV uploads -> sees 0 uploads (Agent didn't upload any)
+    list_agent_a = client.get(f"/api/v1/csv-uploads?organization_id={org_id}", headers={"Authorization": f"Bearer {agent_a_token}"})
+    assert list_agent_a.status_code == status.HTTP_200_OK
+    items_agent_a = list_agent_a.json()["csv_uploads"]
+    assert len(items_agent_a) == 0
+
+    # Assert Admin lists CSV uploads -> sees ONLY batch_admin.csv
+    list_admin = client.get(f"/api/v1/csv-uploads?organization_id={org_id}", headers={"Authorization": f"Bearer {admin_token}"})
+    assert list_admin.status_code == status.HTTP_200_OK
+    items_admin = list_admin.json()["csv_uploads"]
+    assert len(items_admin) == 1
+    assert items_admin[0]["id"] == upload_admin_id
+
+    # Assert Superadmin lists CSV uploads -> sees ALL 3 uploads
+    list_super = client.get(f"/api/v1/csv-uploads?organization_id={org_id}", headers={"Authorization": f"Bearer {super_token}"})
+    assert list_super.status_code == status.HTTP_200_OK
+    items_super = list_super.json()["csv_uploads"]
+    assert len(items_super) == 3
 
 

@@ -5,15 +5,14 @@ from src.app.models.department import Department
 from src.app.models.user import User
 from src.app.models.base import DatabaseManager
 from src.app.core.logging_config import get_logger
+from src.app.core.roles import ROLES
+from src.app.core.constants import (
+    DEFAULT_PER_MINUTE_COST,
+    DEFAULT_INFRA_FIXED_COST,
+    DEFAULT_MAX_MONTHLY_MINUTES,
+)
 
 logger = get_logger(__name__)
-
-ROLES = {
-    "superadmin": 1,
-    "admin": 2,
-    "manager": 3,
-    "agent": 4
-}
 
 
 class AdminController:
@@ -33,8 +32,9 @@ class AdminController:
                             stt_model_routing: Optional[str] = None,
                             llm_model_routing: Optional[str] = None,
                             default_language: Optional[str] = None,
-                            per_minute_cost: float = 0.0, infra_fixed_cost: float = 0.0,
-                            max_monthly_minutes: float = 50.0,
+                            per_minute_cost: float = DEFAULT_PER_MINUTE_COST,
+                            infra_fixed_cost: float = DEFAULT_INFRA_FIXED_COST,
+                            max_monthly_minutes: float = DEFAULT_MAX_MONTHLY_MINUTES,
                             status_val: Optional[str] = None) -> Dict[str, Any]:
         AdminController._verify_role(current_user, [ROLES["superadmin"]])
 

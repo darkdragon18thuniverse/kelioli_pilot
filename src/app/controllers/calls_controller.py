@@ -12,6 +12,8 @@ from src.app.models.call import Call, CallEvaluation
 from src.app.models.csv_upload import CSVUpload
 from src.app.services.stt import STTService, LLMService
 from src.app.core.logging_config import get_logger
+from src.app.core.roles import ROLES
+from src.app.core.constants import TEMP_AUDIO_DIR
 
 logger = get_logger(__name__)
 
@@ -20,8 +22,6 @@ try:
 except ImportError:
     MutagenFile = None
 
-TEMP_AUDIO_DIR = "./media/temp_audio"
-ROLES = {"superadmin": 1, "admin": 2, "manager": 3, "agent": 4}
 
 
 class CallsController:
@@ -104,6 +104,12 @@ class CallsController:
     @staticmethod
     def _run_evaluation_pipeline(call_id: int, org: Any, dept: Any, audio_path: str) -> Dict[str, Any]:
         """Shared STT + LLM evaluation pipeline used by both single-upload and CSV batch flows."""
+        duration_seconds = CallsController._get_audio_duration_seconds(audio_path)
+        if duration_seconds <= 0.0:
+            existing_call = Call.get_by_id(call_id)
+            if existing_call and existing_call["duration_seconds"]:
+                duration_seconds = float(existing_call["duration_seconds"])
+
         logger.info(f"Pipeline Execution: Starting STT for call_id={call_id}")
         stt_result = STTService.transcribe(audio_path)
         transcript = stt_result.get("transcript", "")
@@ -137,9 +143,9 @@ class CallsController:
         eval_items = evaluation_result.get("evaluations", [])
         passed_count = sum(1 for item in eval_items if item.get("did_follow_rule") == 1)
         total_checked = len(eval_items)
-        score = (passed_count / total_checked * 100.0) if total_checked > 0 else 100.0
+        score = (passed_count / total_checked * 100.0) if total_checked > 0 else None
 
-        logger.info(f"Pipeline Execution: LLM evaluation done for call_id={call_id}. Score: {score:.1f}% ({passed_count}/{total_checked} passed)")
+        logger.info(f"Pipeline Execution: LLM evaluation done for call_id={call_id}. Score: {f'{score:.1f}%' if score is not None else 'N/A'} ({passed_count}/{total_checked} passed)")
 
         evaluations_to_save = []
         for item in eval_items:
@@ -151,91 +157,35 @@ class CallsController:
                 "did_follow_rule": item["did_follow_rule"],
                 "failure_offset_seconds": None,  # STT provides transcript only, no timestamps to base this on
                 "failure_reason": item.get("failure_reason"),
+                "failed_line_text": item.get("failed_line_text"),
                 "parameter_snapshot_text": snapshot_text
             })
         if evaluations_to_save:
             CallEvaluation.create_batch(evaluations_to_save)
+
+        stt_model = stt_result.get("model_used", "saaras:v3")
+        llm_model_used = evaluation_result.get("model_used", llm_model)
+        prompt_tokens = evaluation_result.get("prompt_tokens", 0)
+        completion_tokens = evaluation_result.get("completion_tokens", 0)
+
         Call.update_evaluation_results(
             call_id=call_id,
             transcript=transcript,
+            duration_seconds=duration_seconds,
             total_checked=total_checked,
             total_passed=passed_count,
             compliance_score_percentage=score,
+            procedure_enquired=procedure_enquired,
+            upstream_tokens_prompt=prompt_tokens,
+            upstream_tokens_completion=completion_tokens,
+            runtime_stt_model=stt_model,
+            runtime_llm_model=llm_model_used,
             processing_status="completed"
         )
         return {
             "procedure_enquired": procedure_enquired,
             "compliance_score_percentage": score
         }
-
-    @staticmethod
-    def process_audio_upload(current_user: Dict[str, Any], file: UploadFile,
-                             organization_id: int, department_id: int,
-                             user_id: Optional[int] = None) -> Dict[str, Any]:
-        """Saves file locally, retains through retries, cleans up temp file on LLM success."""
-        CallsController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"], ROLES["manager"]])
-        if current_user["role_id"] == ROLES["admin"] and current_user["organization_id"] != organization_id:
-            logger.warning(f"Cross-tenant call processing denied for user_id={current_user['id']} targeting org_id={organization_id}")
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot process calls outside your organization.")
-        if current_user["role_id"] == ROLES["manager"]:
-            if current_user["organization_id"] != organization_id or current_user["department_id"] != department_id:
-                logger.warning(f"Cross-department call processing denied for manager user_id={current_user['id']}")
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Managers can only process calls for their assigned department.")
-        org = Organization.get_by_id(organization_id)
-        dept = Department.get_by_id(department_id)
-        if not org or not dept or dept["organization_id"] != organization_id:
-            logger.warning(f"Invalid org/dept context for call upload: org_id={organization_id}, dept_id={department_id}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid organization or department context.")
-        org_dict = dict(org)
-        CallsController._enforce_org_active(org_dict)
-
-        os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
-        file_ext = os.path.splitext(file.filename)[1] or ".wav"
-        temp_filename = f"{uuid.uuid4()}{file_ext}"
-        local_file_path = os.path.join(TEMP_AUDIO_DIR, temp_filename)
-        with open(local_file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        file_size = os.path.getsize(local_file_path)
-        duration_seconds = CallsController._get_audio_duration_seconds(local_file_path)
-
-        call_id = Call.create(
-            organization_id=organization_id,
-            department_id=department_id,
-            user_id=user_id or current_user["id"],
-            audio_url=local_file_path,
-            duration_seconds=duration_seconds,
-            file_size_bytes=file_size
-        )
-        logger.info(f"Created call record call_id={call_id} for file '{file.filename}' ({file_size} bytes, {duration_seconds:.1f}s)")
-
-        try:
-            result = CallsController._run_evaluation_pipeline(call_id, org_dict, dict(dept), local_file_path)
-            if os.path.exists(local_file_path):
-                os.remove(local_file_path)
-            CallsController._check_and_apply_monthly_cap(organization_id, org_dict.get("max_monthly_minutes"))
-            logger.info(f"Call call_id={call_id} evaluated successfully. Status: completed")
-            return {
-                "status": "success",
-                "call_id": call_id,
-                "procedure_enquired": result["procedure_enquired"],
-                "compliance_score_percentage": result["compliance_score_percentage"],
-                "message": "Call evaluated successfully."
-            }
-        except Exception as e:
-            logger.exception(f"Call processing pipeline failed for call_id={call_id}: {e}")
-            Call.update_evaluation_results(
-                call_id=call_id,
-                transcript="",
-                total_checked=0,
-                total_passed=0,
-                compliance_score_percentage=0.0,
-                processing_status="failed",
-                error_message=str(e)
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Call processing pipeline failed: {str(e)}"
-            )
 
     @staticmethod
     def list_calls(current_user: Dict[str, Any], organization_id: Optional[int] = None,
@@ -262,14 +212,22 @@ class CallsController:
             user_id=current_user["id"] if current_user["role_id"] == ROLES["agent"] else None
         )
         calls = [dict(r) for r in rows] if rows else []
-        for c in calls:
-            c["evaluations"] = []
+        if calls:
+            call_ids = [c["id"] for c in calls]
+            eval_rows = CallEvaluation.list_by_call_ids(call_ids)
+            eval_map: Dict[int, List[Dict[str, Any]]] = {}
+            for r in eval_rows:
+                r_dict = dict(r)
+                cid = r_dict["call_id"]
+                eval_map.setdefault(cid, []).append(r_dict)
+            for c in calls:
+                c["evaluations"] = eval_map.get(c["id"], [])
         logger.info(f"Retrieved {len(calls)} call records for user_id={current_user['id']} (effective org={effective_org_id}, dept={effective_dept_id})")
         return {"calls": calls}
 
     @staticmethod
     def get_call_details(current_user: Dict[str, Any], call_id: int) -> Dict[str, Any]:
-        CallsController._verify_role(current_user, [1, 2, 3, 4])
+        CallsController._verify_role(current_user, list(ROLES.values()))
         call = Call.get_by_id(call_id)
         if not call:
             logger.warning(f"Call record not found: call_id={call_id}")
@@ -290,9 +248,92 @@ class CallsController:
         return call_dict
 
     @staticmethod
+    def get_export_data(current_user: Dict[str, Any], call_ids: List[int],
+                        organization_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Fetches export call records (joined with agent name and department name)
+        scoped strictly to caller's authorization. Rejects if any call_id is unauthorized.
+        """
+        CallsController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"], ROLES["manager"], ROLES["agent"]])
+        effective_org_id = organization_id
+        effective_dept_id = None
+
+        if current_user["role_id"] in [ROLES["admin"], ROLES["manager"], ROLES["agent"]]:
+            effective_org_id = current_user["organization_id"]
+        if current_user["role_id"] in [ROLES["manager"], ROLES["agent"]]:
+            effective_dept_id = current_user["department_id"]
+        if current_user["role_id"] == ROLES["superadmin"] and effective_org_id is None:
+            logger.warning("Superadmin export data query missing organization_id filter.")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="organization_id is required when exporting calls as Superadmin."
+            )
+
+        if not call_ids:
+            return {"calls": []}
+
+        rows = Call.get_export_calls(call_ids)
+        fetched_calls = [dict(r) for r in rows] if rows else []
+        fetched_map = {c["id"]: c for c in fetched_calls}
+
+        # Verify all requested call_ids exist and respect RBAC scoping
+        for cid in call_ids:
+            if cid not in fetched_map:
+                logger.warning(f"Call record not found or inaccessible: call_id={cid}")
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Access denied for call_id={cid}")
+
+            call_record = fetched_map[cid]
+            if call_record["organization_id"] != effective_org_id:
+                logger.warning(f"Cross-tenant call export denied for call_id={cid} to user_id={current_user['id']}")
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+            if effective_dept_id is not None and call_record["department_id"] != effective_dept_id:
+                logger.warning(f"Cross-department call export denied for call_id={cid} to user_id={current_user['id']}")
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+            if current_user["role_id"] == ROLES["agent"] and call_record["user_id"] != current_user["id"]:
+                logger.warning(f"Cross-agent call export denied for call_id={cid} to agent user_id={current_user['id']}")
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+
+        # Batch fetch evaluations for all requested call_ids
+        eval_rows = CallEvaluation.list_by_call_ids(call_ids)
+        eval_map: Dict[int, List[Dict[str, Any]]] = {}
+        for r in eval_rows:
+            r_dict = dict(r)
+            eval_item = {
+                "parameter_name": r_dict.get("parameter_name"),
+                "severity_level": r_dict.get("severity_level"),
+                "did_follow_rule": r_dict.get("did_follow_rule"),
+                "failure_reason": r_dict.get("failure_reason"),
+                "failed_line_text": r_dict.get("failed_line_text"),
+            }
+            eval_map.setdefault(r_dict["call_id"], []).append(eval_item)
+
+        export_calls = []
+        for cid in call_ids:
+            c = fetched_map[cid]
+            export_item = {
+                "id": c["id"],
+                "created_at": c.get("created_at"),
+                "transcript": c.get("transcript"),
+                "procedure_enquired": c.get("procedure_enquired"),
+                "compliance_score_percentage": c.get("compliance_score_percentage"),
+                "department_id": c["department_id"],
+                "department_name": c.get("department_name"),
+                "user_id": c.get("user_id"),
+                "agent_name": c.get("agent_name"),
+                "evaluations": eval_map.get(cid, [])
+            }
+            export_calls.append(export_item)
+
+
+        logger.info(f"Exported data for {len(export_calls)} calls for user_id={current_user['id']}")
+        return {"calls": export_calls}
+
+
+    @staticmethod
     def process_audio_csv(current_user: Dict[str, Any], file: UploadFile) -> Dict[str, Any]:
         """
-        Parses a batch CSV file, tracks progress via the CSVUpload model.
+        Parses a batch CSV file, validates rows synchronously, creates pending calls,
+        and returns 202 response immediately while background worker processes calls.
         """
         CallsController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"], ROLES["manager"]])
         import csv
@@ -329,12 +370,9 @@ class CallsController:
         except ValueError as e:
             logger.warning(f"Duplicate CSV batch upload detected for file '{file.filename}': {e}")
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-        processed_count = 0
+
         failed_count = 0
         for idx, row in enumerate(rows, 1):
-            resolved_path = None
-            is_temp = False
-            call_id = None
             try:
                 row_org_id_raw = row.get("organization_id")
                 row_dept_id_raw = row.get("department_id")
@@ -376,50 +414,35 @@ class CallsController:
                     failed_count += 1
                     CSVUpload.increment_progress(csv_upload_id, is_success=False)
                     continue
-                resolved_path, is_temp = CallsController._resolve_audio_source(audio_path)
-                duration_seconds = CallsController._get_audio_duration_seconds(resolved_path)
-                file_size = os.path.getsize(resolved_path) if os.path.exists(resolved_path) else 0
-                call_id = Call.create(
+
+                Call.create(
                     organization_id=org_id,
                     department_id=dept_id,
                     user_id=u_id,
                     csv_upload_id=csv_upload_id,
                     audio_url=audio_path,
-                    duration_seconds=duration_seconds,
-                    file_size_bytes=file_size
+                    duration_seconds=0.0,
+                    file_size_bytes=0
                 )
-                CallsController._run_evaluation_pipeline(call_id, org_dict, dict(dept), resolved_path)
-                processed_count += 1
-                CSVUpload.increment_progress(csv_upload_id, is_success=True)
-                CallsController._check_and_apply_monthly_cap(org_id, org_dict.get("max_monthly_minutes"))
             except Exception as e:
-                logger.error(f"CSV Row #{idx} call pipeline error: {e}")
-                if call_id is not None:
-                    Call.update_evaluation_results(
-                        call_id=call_id,
-                        transcript="",
-                        total_checked=0,
-                        total_passed=0,
-                        compliance_score_percentage=0.0,
-                        processing_status="failed",
-                        error_message=str(e)
-                    )
+                logger.error(f"CSV Row #{idx} call enqueue error: {e}")
                 failed_count += 1
                 CSVUpload.increment_progress(csv_upload_id, is_success=False)
-            finally:
-                if is_temp and resolved_path and os.path.exists(resolved_path):
-                    os.remove(resolved_path)
-        final_status = "completed" if failed_count == 0 else "failed" if processed_count == 0 else "completed"
-        CSVUpload.update_status(csv_upload_id, final_status)
-        logger.info(f"CSV batch processing upload_id={csv_upload_id} finalized: status='{final_status}', processed={processed_count}, failed={failed_count}")
+
+        batch_status = "processing"
+        if failed_count == total_records:
+            batch_status = "failed"
+            CSVUpload.update_status(csv_upload_id, "failed")
+
+        logger.info(f"CSV batch upload upload_id={csv_upload_id} accepted: queued rows={total_records - failed_count}, failed validation={failed_count}")
         return {
             "status": "success",
             "csv_upload_id": csv_upload_id,
             "total_records": total_records,
-            "processed_records": processed_count,
+            "processed_records": 0,
             "failed_records": failed_count,
-            "batch_status": final_status,
-            "message": "CSV batch processing completed."
+            "batch_status": batch_status,
+            "message": "CSV batch upload accepted and queued for processing."
         }
 
     @staticmethod
@@ -446,9 +469,13 @@ class CallsController:
                 detail="Organization record not found."
             )
 
-        rows = CSVUpload.list_by_organization(organization_id)
+        filter_user_id = None
+        if current_user["role_id"] in [ROLES["admin"], ROLES["manager"], ROLES["agent"]]:
+            filter_user_id = current_user["id"]
+
+        rows = CSVUpload.list_by_organization(organization_id, user_id=filter_user_id)
         csv_uploads = [dict(row) for row in rows] if rows else []
-        logger.info(f"Retrieved {len(csv_uploads)} CSV upload records for org_id={organization_id}")
+        logger.info(f"Retrieved {len(csv_uploads)} CSV upload records for org_id={organization_id}, user_id={filter_user_id}")
         return {"csv_uploads": csv_uploads}
 
     @staticmethod

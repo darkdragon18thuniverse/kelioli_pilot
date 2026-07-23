@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS call_evaluations (
     did_follow_rule INTEGER NOT NULL CHECK (did_follow_rule IN (0, 1)),             
     failure_offset_seconds INTEGER DEFAULT NULL,  -- Relative integer track for seamless playhead syncing
     failure_reason TEXT,                          
+    failed_line_text TEXT,                        -- Exact verbatim quote from transcript if rule failed
     parameter_snapshot_text TEXT,                 -- Frozen copy of the evaluation rule criteria
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     

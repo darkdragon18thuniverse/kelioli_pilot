@@ -3,15 +3,9 @@ from fastapi import HTTPException, status
 from src.app.models.billing import Billing
 from src.app.models.organization import Organization
 from src.app.core.logging_config import get_logger
+from src.app.core.roles import ROLES
 
 logger = get_logger(__name__)
-
-ROLES = {
-    "superadmin": 1,
-    "admin": 2,
-    "manager": 3,
-    "agent": 4
-}
 
 
 class BillingController:

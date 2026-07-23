@@ -4,6 +4,7 @@ import bcrypt
 from src.app.models.base import DatabaseManager
 from src.app.models.organization import Organization
 from src.app.models.department import Department
+from src.app.core.roles import ROLES
 
 class User:
     """
@@ -30,10 +31,10 @@ class User:
         pwd_hash = User._hash_password(password_raw)
 
         # 1. Tenant Boundary Structural Checks & Guard Clauses
-        if role_id != 1 and not organization_id:
+        if role_id != ROLES["superadmin"] and not organization_id:
             raise ValueError("Relational Violation: Non-superadmin records must specify a valid organization mapping.")
             
-        if role_id == 4 and not department_id:
+        if role_id == ROLES["agent"] and not department_id:
             raise ValueError("Relational Violation: Agent accounts must be assigned to an active department framework.")
 
         if organization_id:

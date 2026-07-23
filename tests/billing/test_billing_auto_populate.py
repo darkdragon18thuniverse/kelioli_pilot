@@ -26,17 +26,16 @@ def test_auto_populate_daily_usage_metrics_on_call_upload(client):
     login_res = client.post("/api/v1/auth/login", data={"username": "user@autopop.com", "password": "Password2026!"})
     token = login_res.json()["access_token"]
 
-    fake_wav_data = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x44\xac\x00\x00\x88\x58\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
-
-    upload_res = client.post(
-        "/api/v1/calls/upload",
-        files={"file": ("test_call.wav", io.BytesIO(fake_wav_data), "audio/wav")},
-        data={"organization_id": org_id, "department_id": dept_id, "user_id": user_id},
-        headers={"Authorization": f"Bearer {token}"}
+    from src.app.models.call import Call
+    call_id = Call.create(
+        organization_id=org_id,
+        department_id=dept_id,
+        user_id=user_id,
+        audio_url="test.wav"
     )
 
-    assert upload_res.status_code == status.HTTP_201_CREATED
-    assert upload_res.json()["status"] == "success"
+    from src.app.services.call_queue_worker import process_next_pending_call
+    process_next_pending_call()
 
     # Query /api/v1/billing/usage to verify daily_usage_metrics was auto-populated
     usage_res = client.get(

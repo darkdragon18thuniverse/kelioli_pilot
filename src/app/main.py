@@ -31,10 +31,14 @@ app = FastAPI(
 app.add_middleware(LoggingAndCorrelationMiddleware)
 
 # --- CORS Middleware Security Configuration ---
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+cors_env = os.getenv("CORS_ALLOWED_ORIGINS")
+if cors_env:
+    origins = [origin.strip() for origin in cors_env.split(",") if origin.strip()]
+else:
+    origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,6 +50,14 @@ app.add_middleware(
 
 # --- Database Bootstrapping ---
 init_database()
+
+@app.on_event("startup")
+def startup_event():
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        import threading
+        from src.app.services.call_queue_worker import run_worker
+        logger.info("Starting background call queue worker thread.")
+        threading.Thread(target=run_worker, daemon=True).start()
 
 # --- Application Routing Nodes Mount ---
 app.include_router(auth_router, prefix="/api/v1/auth")

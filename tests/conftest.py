@@ -25,7 +25,8 @@ MOCK_LLM_EVALUATION_RESPONSE = {
             "parameter_id": 1,
             "did_follow_rule": 1,
             "failure_offset_seconds": None,
-            "failure_reason": None
+            "failure_reason": None,
+            "failed_line_text": None
         }
     ]
 }
@@ -75,7 +76,8 @@ def mock_external_ai_services(monkeypatch):
                 "parameter_id": param["id"],
                 "did_follow_rule": 1,
                 "failure_offset_seconds": None,
-                "failure_reason": None
+                "failure_reason": None,
+                "failed_line_text": None
             })
         return {
             "procedure_enquired": MOCK_LLM_EVALUATION_RESPONSE["procedure_enquired"],

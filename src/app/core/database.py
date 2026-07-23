@@ -48,6 +48,11 @@ def init_database() -> None:
             schema_sql = script_file.read()
             
         conn.executescript(schema_sql)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(call_evaluations)")
+        cols = [r["name"] for r in cursor.fetchall()]
+        if "failed_line_text" not in cols:
+            cursor.execute("ALTER TABLE call_evaluations ADD COLUMN failed_line_text TEXT;")
         conn.commit()
         logger.info("Database schema initialized and bootstrapped successfully.")
     except sqlite3.Error as e:

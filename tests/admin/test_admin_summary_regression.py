@@ -44,7 +44,7 @@ def test_admin_summary_reflects_real_call_count(client):
     )
     org_id = Organization.create(name="Call Count Org", slug="call-count-org")
     dept_id = Department.create(organization_id=org_id, name="Dept", slug="dept")
-    User.create(
+    admin_id = User.create(
         role_id=2, organization_id=org_id, department_id=None,
         name="Admin", email="admin_cc@test.com", password_raw="Password2026!"
     )
@@ -52,15 +52,13 @@ def test_admin_summary_reflects_real_call_count(client):
     login_res = client.post("/api/v1/auth/login", data={"username": "admin_cc@test.com", "password": "Password2026!"})
     admin_token = login_res.json()["access_token"]
 
-    import io
-    fake_audio = io.BytesIO(b"RIFF....WAVEfmt ....data....")
-    upload_res = client.post(
-        "/api/v1/calls/upload",
-        data={"organization_id": org_id, "department_id": dept_id},
-        files={"file": ("test.wav", fake_audio, "audio/wav")},
-        headers={"Authorization": f"Bearer {admin_token}"}
+    from src.app.models.call import Call
+    Call.create(
+        organization_id=org_id,
+        department_id=dept_id,
+        user_id=admin_id,
+        audio_url="test.wav"
     )
-    assert upload_res.status_code == 201
 
     super_login = client.post("/api/v1/auth/login", data={"username": "super2@curigon.com", "password": "SuperPass2026!"})
     super_token = super_login.json()["access_token"]

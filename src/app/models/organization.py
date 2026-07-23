@@ -1,6 +1,11 @@
 import sqlite3
 from typing import Optional, List, Dict, Any
 from src.app.models.base import DatabaseManager
+from src.app.core.constants import (
+    DEFAULT_PER_MINUTE_COST,
+    DEFAULT_INFRA_FIXED_COST,
+    DEFAULT_MAX_MONTHLY_MINUTES,
+)
 
 
 class Organization:
@@ -8,7 +13,9 @@ class Organization:
     def create(name: str, slug: str, billing_email: Optional[str] = None, tier: str = "free",
                stt_model_routing: str = "sarvam-2", llm_model_routing: str = "openrouter/free",
                company_context: Optional[str] = None, default_language: Optional[str] = None,
-               per_minute_cost: float = 0.0, infra_fixed_cost: float = 0.0, max_monthly_minutes: float = 50.0,
+               per_minute_cost: float = DEFAULT_PER_MINUTE_COST,
+               infra_fixed_cost: float = DEFAULT_INFRA_FIXED_COST,
+               max_monthly_minutes: float = DEFAULT_MAX_MONTHLY_MINUTES,
                status: str = "active") -> int:
         slug_clean = slug.lower().strip()
         existing = Organization.get_by_slug(slug_clean)

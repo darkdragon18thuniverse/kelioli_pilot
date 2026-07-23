@@ -1,11 +1,5 @@
-Here is the updated, minimal, and clean `README.md` incorporating the `pytest` execution commands alongside the existing setup flow.
-
----
-
-### Updated `README.md`
-
-```markdown
 # Kelioli Pilot API
+
 
 A minimal, production-grade, and highly optimized FastAPI application for administrative management, role-based access control, and automated telephonic call record processing via Sarvam AI speech-to-text.
 
@@ -34,12 +28,21 @@ kelioli_pilot/
 
 ## Installation & Setup
 
-### 1. Install Dependencies
+### 1. Audio Processing & System Dependencies
+> **Note**: **No system-level `ffmpeg` binary is required.** Audio chunking ($\le 29\text{s}$ segments for Sarvam STT REST API) is handled purely in-memory using PyAV (the `av` package binding).
+
+### 2. Install Python Dependencies
+
+Using `uv` (recommended) or `pip`:
 
 ```bash
-uv pip install -r requirements.txt
+# Sync dependencies via uv
+uv sync
 
+# Or install via requirements.txt
+uv pip install -r requirements.txt
 ```
+
 
 ### 2. Environment Configuration
 
@@ -86,6 +89,20 @@ uv run pytest tests/auth/test_auth_logic.py -v
 
 ---
 
+## Organization Data Export & Import
+
+Dump an organization's full data tree (departments, users, parameters, csv uploads, calls, evaluations, metrics, etc.) to JSON for dev workflow, or reload it into a target database:
+
+```bash
+# Export an organization's data tree
+python scripts/export_org_data.py --org-id 5
+
+# Import an organization's data dump into a target database
+python scripts/import_org_data.py --input scripts/exports/org_5_<timestamp>.json
+```
+
+---
+
 ## Core API Endpoints
 
 1. **Health Check**
@@ -105,9 +122,5 @@ uv run pytest tests/auth/test_auth_logic.py -v
 
 4. **Call Processing**
 * `POST /api/v1/calls/process-csv` – Multipart CSV upload for concurrent Sarvam AI transcriptions.
-
-
-
-```
 
 ```

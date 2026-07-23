@@ -3,6 +3,11 @@ from pydantic import BaseModel, EmailStr, Field
 from typing import Dict, Any, Optional, List
 from src.app.controllers.auth_controller import AuthController
 from src.app.controllers.admin_controller import AdminController
+from src.app.core.constants import (
+    DEFAULT_PER_MINUTE_COST,
+    DEFAULT_INFRA_FIXED_COST,
+    DEFAULT_MAX_MONTHLY_MINUTES,
+)
 
 router = APIRouter(prefix="", tags=["Administration"])
 
@@ -17,9 +22,9 @@ class OrganizationCreateSchema(BaseModel):
     stt_model_routing: Optional[str] = Field(None, examples=["sarvam-2"])
     llm_model_routing: Optional[str] = Field(None, examples=["openrouter/free"])
     default_language: Optional[str] = Field(None, examples=["en-IN"])
-    per_minute_cost: float = Field(0.0, examples=[0.15])
-    infra_fixed_cost: float = Field(0.0, examples=[49.00])
-    max_monthly_minutes: float = Field(50.0, examples=[500.0])
+    per_minute_cost: float = Field(DEFAULT_PER_MINUTE_COST, examples=[0.15])
+    infra_fixed_cost: float = Field(DEFAULT_INFRA_FIXED_COST, examples=[49.00])
+    max_monthly_minutes: float = Field(DEFAULT_MAX_MONTHLY_MINUTES, examples=[500.0])
     status: Optional[str] = Field(None, examples=["active", "suspended", "limit_exceeded"])
 
 
@@ -96,7 +101,7 @@ class OrganizationRecordSchema(BaseModel):
     default_language: Optional[str] = Field(None, examples=["en-IN"])
     per_minute_cost: float = Field(..., examples=[0.0])
     infra_fixed_cost: float = Field(..., examples=[0.0])
-    max_monthly_minutes: Optional[float] = Field(50.0, examples=[50.0])
+    max_monthly_minutes: Optional[float] = Field(DEFAULT_MAX_MONTHLY_MINUTES, examples=[50.0])
     status: str = Field("active", examples=["active"])
 
 

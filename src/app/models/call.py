@@ -30,22 +30,38 @@ class Call:
 
     @staticmethod
     def update_evaluation_results(call_id: int, transcript: str, total_checked: int,
-                                  total_passed: int, compliance_score_percentage: float,
+                                  total_passed: int, compliance_score_percentage: Optional[float],
+                                  duration_seconds: float = 0.0,
+                                  procedure_enquired: Optional[str] = None,
+                                  upstream_tokens_prompt: int = 0,
+                                  upstream_tokens_completion: int = 0,
+                                  runtime_stt_model: Optional[str] = None,
+                                  runtime_llm_model: Optional[str] = None,
                                   processing_status: str = "completed",
                                   error_message: Optional[str] = None) -> bool:
         query = """
             UPDATE calls SET
                 transcript = ?,
+                duration_seconds = ?,
                 total_parameters_checked = ?,
                 total_parameters_passed = ?,
                 compliance_score_percentage = ?,
+                procedure_enquired = ?,
+                upstream_tokens_prompt = ?,
+                upstream_tokens_completion = ?,
+                runtime_stt_model = ?,
+                runtime_llm_model = ?,
                 processing_status = ?,
                 error_message = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?;
         """
         updated = DatabaseManager.execute_update(
-            query, (transcript, total_checked, total_passed, compliance_score_percentage, processing_status, error_message, call_id)
+            query, (
+                transcript, duration_seconds, total_checked, total_passed, compliance_score_percentage,
+                procedure_enquired, upstream_tokens_prompt, upstream_tokens_completion,
+                runtime_stt_model, runtime_llm_model, processing_status, error_message, call_id
+            )
         ) > 0
         if updated:
             from src.app.models.billing import Billing
@@ -90,6 +106,25 @@ class Call:
         rows = DatabaseManager.execute_query(query, (organization_id, month_str))
         return float(rows[0]["total_seconds"]) if rows else 0.0
 
+    @staticmethod
+    def get_export_calls(call_ids: List[int]) -> List[sqlite3.Row]:
+        if not call_ids:
+            return []
+        placeholders = ",".join("?" for _ in call_ids)
+        query = f"""
+            SELECT 
+                c.*,
+                d.name AS department_name,
+                u.name AS agent_name
+            FROM calls c
+            LEFT JOIN departments d ON c.department_id = d.id
+            LEFT JOIN users u ON c.user_id = u.id
+            WHERE c.id IN ({placeholders})
+            ORDER BY c.id DESC;
+        """
+        return DatabaseManager.execute_query(query, tuple(call_ids))
+
+
 
 class CallEvaluation:
     @staticmethod
@@ -99,15 +134,15 @@ class CallEvaluation:
 
         query = """
             INSERT INTO call_evaluations (
-                call_id, parameter_id, did_follow_rule, failure_offset_seconds, failure_reason, parameter_snapshot_text
-            ) VALUES (?, ?, ?, ?, ?, ?);
+                call_id, parameter_id, did_follow_rule, failure_offset_seconds, failure_reason, failed_line_text, parameter_snapshot_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?);
         """
         with DatabaseManager.get_connection() as conn:
             cursor = conn.cursor()
             for ev in evaluations:
                 cursor.execute(query, (
                     ev["call_id"], ev["parameter_id"], ev["did_follow_rule"],
-                    ev.get("failure_offset_seconds"), ev.get("failure_reason"), ev.get("parameter_snapshot_text")
+                    ev.get("failure_offset_seconds"), ev.get("failure_reason"), ev.get("failed_line_text"), ev.get("parameter_snapshot_text")
                 ))
             conn.commit()
         return True
@@ -121,3 +156,17 @@ class CallEvaluation:
             WHERE ce.call_id = ?;
         """
         return DatabaseManager.execute_query(query, (call_id,))
+
+    @staticmethod
+    def list_by_call_ids(call_ids: List[int]) -> List[sqlite3.Row]:
+        if not call_ids:
+            return []
+        placeholders = ",".join("?" for _ in call_ids)
+        query = f"""
+            SELECT ce.*, cp.parameter_name, cp.severity_level
+            FROM call_evaluations ce
+            JOIN compliance_parameters cp ON ce.parameter_id = cp.id
+            WHERE ce.call_id IN ({placeholders});
+        """
+        return DatabaseManager.execute_query(query, tuple(call_ids))
+
