@@ -103,3 +103,36 @@ class AuthController:
             "name": user["name"],
             "status": user["status"]
         }
+
+    @staticmethod
+    def change_password(current_user: Dict[str, Any], current_password: str, new_password: str) -> Dict[str, str]:
+        """Allows any authenticated user to change their password upon verifying current credentials."""
+        import bcrypt
+
+        user = User.get_by_id(current_user["id"])
+        if not user:
+            logger.warning(f"Change password failed: User user_id={current_user['id']} not found in database.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User account record not found."
+            )
+
+        password_bytes = current_password.encode('utf-8')
+        hashed_bytes = user["password_hash"].encode('utf-8')
+        if not bcrypt.checkpw(password_bytes, hashed_bytes):
+            logger.warning(f"Change password failed: Incorrect current password provided for user_id={current_user['id']}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Current password is incorrect."
+            )
+
+        updated = User.update(current_user["id"], {"password_raw": new_password})
+        if not updated:
+            logger.error(f"Failed to update password in database for user_id={current_user['id']}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update password."
+            )
+
+        logger.info(f"Password changed successfully for user_id={current_user['id']}")
+        return {"message": "Password updated successfully"}

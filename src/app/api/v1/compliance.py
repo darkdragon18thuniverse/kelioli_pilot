@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional, List
 from src.app.controllers.auth_controller import AuthController
 from src.app.controllers.compliance_controller import ComplianceController
 
-router = APIRouter(prefix="/compliance/parameters", tags=["Compliance Rules"])
+router = APIRouter(prefix="/compliance", tags=["Compliance Rules"])
 
 # --- Request Schemas ---
 
@@ -21,6 +21,11 @@ class ComplianceUpdateSchema(BaseModel):
     rule_description: Optional[str] = Field(None, min_length=5)
     severity_level: Optional[str] = Field(None, examples=["critical"])
     is_active: Optional[int] = Field(None, examples=[1])
+
+class FormatRuleRequestSchema(BaseModel):
+    raw_input: str = Field(..., min_length=1, examples=["Agent must verify DOB before disclosing medical info"])
+    expected_action: Optional[str] = Field(None, examples=["Agent verifies caller's DOB"])
+    failure_example: Optional[str] = Field(None, examples=["Agent discloses results without verifying DOB"])
 
 # --- Response Schemas ---
 
@@ -41,9 +46,25 @@ class ComplianceRecordSchema(BaseModel):
 class ComplianceListResponseSchema(BaseModel):
     parameters: List[ComplianceRecordSchema]
 
+class FormatRuleResponseSchema(BaseModel):
+    expected_action: str = Field(..., examples=["The agent must verify caller's DOB before disclosing any medical info."])
+    failure_example: str = Field(..., examples=["The agent reads test results to caller without confirming DOB."])
+
 # --- Routes ---
 
-@router.post("", status_code=status.HTTP_201_CREATED, response_model=StandardResponseSchema)
+@router.post("/format-rule", status_code=status.HTTP_200_OK, response_model=FormatRuleResponseSchema)
+def format_compliance_rule(
+    payload: FormatRuleRequestSchema,
+    current_user: Dict[str, Any] = Depends(AuthController.get_current_user_context)
+) -> Dict[str, Any]:
+    return ComplianceController.format_rule(
+        current_user=current_user,
+        raw_input=payload.raw_input,
+        expected_action=payload.expected_action,
+        failure_example=payload.failure_example
+    )
+
+@router.post("/parameters", status_code=status.HTTP_201_CREATED, response_model=StandardResponseSchema)
 def create_compliance_parameter(
     payload: ComplianceCreateSchema,
     current_user: Dict[str, Any] = Depends(AuthController.get_current_user_context)
@@ -57,7 +78,7 @@ def create_compliance_parameter(
         severity_level=payload.severity_level
     )
 
-@router.get("", status_code=status.HTTP_200_OK, response_model=ComplianceListResponseSchema)
+@router.get("/parameters", status_code=status.HTTP_200_OK, response_model=ComplianceListResponseSchema)
 def list_compliance_parameters(
     organization_id: int = Query(..., description="Organization ID"),
     department_id: int = Query(..., description="Target Department ID"),
@@ -69,14 +90,14 @@ def list_compliance_parameters(
         department_id=department_id
     )
 
-@router.get("/{parameter_id}", status_code=status.HTTP_200_OK, response_model=ComplianceRecordSchema)
+@router.get("/parameters/{parameter_id}", status_code=status.HTTP_200_OK, response_model=ComplianceRecordSchema)
 def get_compliance_parameter_by_id(
     parameter_id: int,
     current_user: Dict[str, Any] = Depends(AuthController.get_current_user_context)
 ) -> Dict[str, Any]:
     return ComplianceController.get_parameter_by_id(current_user=current_user, parameter_id=parameter_id)
 
-@router.put("/{parameter_id}", status_code=status.HTTP_200_OK, response_model=StandardResponseSchema)
+@router.put("/parameters/{parameter_id}", status_code=status.HTTP_200_OK, response_model=StandardResponseSchema)
 def update_compliance_parameter(
     parameter_id: int,
     payload: ComplianceUpdateSchema,

@@ -47,3 +47,4 @@ curltester.md
 # ==========================================
 # Keeps your workspace data distinct from operational logs
 *.log
+PROJECT_CONTEXT.md

@@ -204,3 +204,38 @@ class Billing:
 
         query += " ORDER BY usage_date ASC, id ASC;"
         return DatabaseManager.execute_query(query, tuple(params))
+
+    @staticmethod
+    def snapshot_exists(organization_id: int, billing_period_start: str, billing_period_end: str) -> bool:
+        """Checks if a billing snapshot already exists for the given organization and period."""
+        query = """
+            SELECT 1 FROM billing_snapshots
+            WHERE organization_id = ? AND billing_period_start = ? AND billing_period_end = ?
+            LIMIT 1;
+        """
+        rows = DatabaseManager.execute_query(query, (organization_id, billing_period_start, billing_period_end))
+        return len(rows) > 0
+
+    @staticmethod
+    def get_usage_total_for_period(organization_id: int, billing_period_start: str, billing_period_end: str) -> float:
+        """Sums total_minutes from daily_usage_metrics for an org across a specific date range (inclusive)."""
+        query = """
+            SELECT COALESCE(SUM(total_minutes), 0.0) AS total_minutes
+            FROM daily_usage_metrics
+            WHERE organization_id = ? AND usage_date >= ? AND usage_date <= ?;
+        """
+        rows = DatabaseManager.execute_query(query, (organization_id, billing_period_start, billing_period_end))
+        if not rows:
+            return 0.0
+        return round(float(rows[0]["total_minutes"] or 0.0), 2)
+
+    @staticmethod
+    def list_unbilled_usage_months(before_date: str) -> List[sqlite3.Row]:
+        """Lists distinct (organization_id, year_month) tuples from daily_usage_metrics prior to before_date."""
+        query = """
+            SELECT DISTINCT organization_id, strftime('%Y-%m', usage_date) AS year_month
+            FROM daily_usage_metrics
+            WHERE usage_date < ?
+            ORDER BY year_month ASC, organization_id ASC;
+        """
+        return DatabaseManager.execute_query(query, (before_date,))

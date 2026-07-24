@@ -56,8 +56,12 @@ def startup_event():
     if not os.getenv("PYTEST_CURRENT_TEST"):
         import threading
         from src.app.services.call_queue_worker import run_worker
+        from src.app.services.billing_snapshot_worker import run_billing_snapshot_worker
         logger.info("Starting background call queue worker thread.")
         threading.Thread(target=run_worker, daemon=True).start()
+        logger.info("Starting background billing snapshot worker thread.")
+        threading.Thread(target=run_billing_snapshot_worker, daemon=True).start()
+
 
 # --- Application Routing Nodes Mount ---
 app.include_router(auth_router, prefix="/api/v1/auth")

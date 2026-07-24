@@ -212,23 +212,41 @@ EVAL_JSON_SCHEMA = {
 }
 
 
+class FormatRuleLLMResponse(BaseModel):
+    expected_action: str
+    failure_example: str
+
+
+FORMAT_RULE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "expected_action": {"type": "string"},
+        "failure_example": {"type": "string"}
+    },
+    "required": ["expected_action", "failure_example"],
+    "additionalProperties": False
+}
+
+
 class LLMService:
     @staticmethod
-    def _call_openrouter(api_key: str, selected_model: str, messages: list) -> str:
+    def _call_openrouter(api_key: str, selected_model: str, messages: list,
+                         json_schema: Optional[dict] = None, schema_name: str = "eval_schema") -> str:
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
+        schema_to_use = json_schema if json_schema is not None else EVAL_JSON_SCHEMA
         payload = {
             "model": selected_model,
             "messages": messages,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "eval_schema",
+                    "name": schema_name,
                     "strict": True,
-                    "schema": EVAL_JSON_SCHEMA
+                    "schema": schema_to_use
                 }
             }
         }
@@ -239,6 +257,64 @@ class LLMService:
             res.raise_for_status()
             response_data = res.json()
             return response_data["choices"][0]["message"]["content"]
+
+    @staticmethod
+    @retry_with_backoff
+    def format_rule(raw_input: str, expected_action: Optional[str] = None,
+                    failure_example: Optional[str] = None, model: Optional[str] = None) -> Dict[str, str]:
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key or api_key == "mock_key":
+            logger.warning("LLM is not configured with a valid live production key.")
+            raise ValueError("LLM is not configured with a valid live production key.")
+
+        selected_model = model or "openrouter/free"
+
+        system_prompt = (
+            "You are an expert compliance rule architect.\n"
+            "Your task is to reformat raw manager input and any pre-filled fields into clear, professional compliance parameter definitions.\n"
+            "Produce JSON containing exactly two keys:\n"
+            "1. 'expected_action': A clear, direct statement of what the agent must do.\n"
+            "2. 'failure_example': A concrete way this rule gets violated.\n"
+            "The output must be generic enough to apply across any domain or department, without referencing specific call timestamps or call-specific details."
+        )
+        user_content = (
+            f"Raw Input: {raw_input}\n"
+            f"Existing Expected Action: {expected_action or 'N/A'}\n"
+            f"Existing Failure Example: {failure_example or 'N/A'}"
+        )
+
+        logger.info(f"Initiating OpenRouter LLM rule reformatting using model '{selected_model}'.")
+        start_time = time.perf_counter()
+        content_str = LLMService._call_openrouter(
+            api_key, selected_model,
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            json_schema=FORMAT_RULE_JSON_SCHEMA,
+            schema_name="format_rule_schema"
+        )
+
+        try:
+            parsed = json.loads(content_str)
+            validated = FormatRuleLLMResponse.model_validate(parsed)
+        except (json.JSONDecodeError, ValidationError) as e:
+            logger.warning(f"LLM rule reformatting response failed structural validation, attempting repair: {e}")
+            repair_content = LLMService._call_openrouter(
+                api_key, selected_model,
+                [
+                    {"role": "system", "content": "You output only valid JSON matching the required schema. Fix the structure of the JSON below. Do not change the values, only the shape."},
+                    {"role": "user", "content": content_str}
+                ],
+                json_schema=FORMAT_RULE_JSON_SCHEMA,
+                schema_name="format_rule_schema"
+            )
+            parsed = json.loads(repair_content)
+            validated = FormatRuleLLMResponse.model_validate(parsed)
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        logger.info(f"OpenRouter LLM rule reformatting completed successfully in {elapsed_ms:.2f}ms")
+        return validated.model_dump()
 
     @staticmethod
     @retry_with_backoff

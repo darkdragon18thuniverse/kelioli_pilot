@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Optional
 from fastapi import HTTPException, status
 from src.app.models.compliance import ComplianceParameter
+from src.app.models.organization import Organization
 from src.app.models.department import Department
 from src.app.core.logging_config import get_logger
 from src.app.core.roles import ROLES
@@ -120,3 +121,34 @@ class ComplianceController:
 
         logger.info(f"Compliance parameter updated successfully: param_id={parameter_id}, updated_fields={list(updates.keys())}")
         return {"status": "success", "message": "Compliance parameter updated successfully."}
+
+    @staticmethod
+    def format_rule(current_user: Dict[str, Any], raw_input: str, expected_action: Optional[str] = None,
+                    failure_example: Optional[str] = None) -> Dict[str, str]:
+        """Formats compliance rule text using AI. Supported for Superadmins, Admins, and Managers."""
+        ComplianceController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"], ROLES["manager"]])
+
+        from src.app.services.stt import LLMService
+
+        model = "openrouter/free"
+        org_id = current_user.get("organization_id")
+        if org_id:
+            org = Organization.get_by_id(org_id)
+            if org and org["llm_model_routing"]:
+                model = org["llm_model_routing"]
+
+        try:
+            result = LLMService.format_rule(
+                raw_input=raw_input,
+                expected_action=expected_action,
+                failure_example=failure_example,
+                model=model
+            )
+            logger.info(f"Compliance rule reformatted successfully for user_id={current_user['id']}")
+            return result
+        except ValueError as e:
+            logger.warning(f"Failed to format compliance rule: {e}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        except Exception as e:
+            logger.exception(f"Unexpected error while formatting compliance rule: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"LLM formatting error: {str(e)}")
