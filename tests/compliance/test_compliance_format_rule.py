@@ -21,7 +21,7 @@ def test_manager_can_format_rule(client):
 
     mock_llm_output = {
         "expected_action": "The agent must verify patient full name and date of birth before providing clinical results.",
-        "failure_example": "The agent proceeds to disclose lab results without confirming the patient's identity."
+        "failure_examples": ["The agent proceeds to disclose lab results without confirming the patient's identity."]
     }
 
     with patch("src.app.services.stt.LLMService.format_rule", return_value=mock_llm_output):
@@ -30,7 +30,7 @@ def test_manager_can_format_rule(client):
             json={
                 "raw_input": "verify DOB before reading results",
                 "expected_action": "Agent verifies DOB",
-                "failure_example": "Reads results without verifying DOB"
+                "failure_examples": ["Reads results without verifying DOB"]
             },
             headers={"Authorization": f"Bearer {token}"}
         )
@@ -38,7 +38,7 @@ def test_manager_can_format_rule(client):
     assert res.status_code == status.HTTP_200_OK
     data = res.json()
     assert data["expected_action"] == mock_llm_output["expected_action"]
-    assert data["failure_example"] == mock_llm_output["failure_example"]
+    assert data["failure_examples"] == mock_llm_output["failure_examples"]
 
 
 def test_admin_and_superadmin_can_format_rule(client):
@@ -54,7 +54,7 @@ def test_admin_and_superadmin_can_format_rule(client):
 
     mock_llm_output = {
         "expected_action": "The agent must state the standard call recording disclaimer.",
-        "failure_example": "The agent omits the call recording disclosure."
+        "failure_examples": ["The agent omits the call recording disclosure."]
     }
 
     with patch("src.app.services.stt.LLMService.format_rule", return_value=mock_llm_output):
@@ -98,12 +98,13 @@ def test_unauthenticated_request_rejected(client):
     assert res.status_code == status.HTTP_401_UNAUTHORIZED
 
 
-def test_format_rule_uses_org_llm_model_routing(client):
-    """format_rule passes calling org's llm_model_routing to LLMService.format_rule, defaulting to openrouter/free."""
-    # Org 1: Custom LLM routing model
+def test_format_rule_uses_org_llm_model_routing_and_provider(client):
+    """format_rule passes calling org's llm_model_routing and llm_provider to LLMService.format_rule."""
+    # Org 1: Custom LLM routing model and provider
     org_id_custom = Organization.create(
         name="Custom LLM Corp", slug="custom-llm-corp",
-        llm_model_routing="anthropic/claude-3.5-sonnet"
+        llm_provider="gemini",
+        llm_model_routing="gemini-2.5-flash"
     )
     User.create(
         role_id=2, organization_id=org_id_custom, department_id=None,
@@ -114,24 +115,26 @@ def test_format_rule_uses_org_llm_model_routing(client):
 
     mock_llm_output = {
         "expected_action": "The agent must confirm caller identification.",
-        "failure_example": "The agent proceeds without caller ID check."
+        "failure_examples": ["The agent proceeds without caller ID check."]
     }
 
     with patch("src.app.services.stt.LLMService.format_rule", return_value=mock_llm_output) as mock_format:
         res1 = client.post(
             "/api/v1/compliance/format-rule",
-            json={"raw_input": "verify caller id"},
+            json={"raw_input": "verify caller id", "thinking_effort": "medium"},
             headers={"Authorization": f"Bearer {token_custom}"}
         )
         assert res1.status_code == status.HTTP_200_OK
         mock_format.assert_called_once_with(
             raw_input="verify caller id",
             expected_action=None,
-            failure_example=None,
-            model="anthropic/claude-3.5-sonnet"
+            failure_examples=None,
+            model="gemini-2.5-flash",
+            provider="gemini",
+            effort="medium"
         )
 
-    # Org 2: Empty/Null LLM routing model (should fall back to openrouter/free)
+    # Org 2: Empty/Null LLM routing model (should fall back to openrouter/free and openrouter provider)
     org_id_fallback = Organization.create(
         name="Default LLM Corp", slug="default-llm-corp",
         llm_model_routing=""
@@ -153,7 +156,10 @@ def test_format_rule_uses_org_llm_model_routing(client):
         mock_format_fallback.assert_called_once_with(
             raw_input="verify caller id",
             expected_action=None,
-            failure_example=None,
-            model="openrouter/free"
+            failure_examples=None,
+            model="openrouter/free",
+            provider="openrouter",
+            effort="low"
         )
+
 

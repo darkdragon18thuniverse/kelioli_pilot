@@ -32,7 +32,7 @@ def test_failed_line_text_and_tokens_and_runtime_models(client, monkeypatch):
     def fake_transcribe(path):
         return {"transcript": "Doctor, my arm hurts.", "language_code": "en-IN", "model_used": "saaras:v3"}
 
-    def fake_evaluate(model, company_context, department_context, parameters, transcript):
+    def fake_evaluate(model, company_context, department_context, parameters, transcript, **kwargs):
         return {
             "procedure_enquired": "Chest Pain Assessment",
             "evaluations": [
@@ -90,7 +90,7 @@ def test_zero_active_parameters_returns_none_score(client, monkeypatch):
     def fake_transcribe(path):
         return {"transcript": "Hello doctor.", "model_used": "saaras:v3"}
 
-    def fake_evaluate(model, company_context, department_context, parameters, transcript):
+    def fake_evaluate(model, company_context, department_context, parameters, transcript, **kwargs):
         return {"procedure_enquired": "Inquiry", "evaluations": [], "prompt_tokens": 20, "completion_tokens": 10, "model_used": "openrouter/free"}
 
     monkeypatch.setattr(STTService, "transcribe", staticmethod(fake_transcribe))

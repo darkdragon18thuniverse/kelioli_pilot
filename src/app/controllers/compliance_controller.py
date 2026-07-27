@@ -124,25 +124,31 @@ class ComplianceController:
 
     @staticmethod
     def format_rule(current_user: Dict[str, Any], raw_input: str, expected_action: Optional[str] = None,
-                    failure_example: Optional[str] = None) -> Dict[str, str]:
+                    failure_examples: Optional[List[str]] = None, thinking_effort: Optional[str] = "low") -> Dict[str, Any]:
         """Formats compliance rule text using AI. Supported for Superadmins, Admins, and Managers."""
         ComplianceController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"], ROLES["manager"]])
 
         from src.app.services.stt import LLMService
 
         model = "openrouter/free"
+        provider = "openrouter"
         org_id = current_user.get("organization_id")
         if org_id:
             org = Organization.get_by_id(org_id)
-            if org and org["llm_model_routing"]:
-                model = org["llm_model_routing"]
+            if org:
+                if org["llm_model_routing"]:
+                    model = org["llm_model_routing"]
+                if org["llm_provider"]:
+                    provider = org["llm_provider"]
 
         try:
             result = LLMService.format_rule(
                 raw_input=raw_input,
                 expected_action=expected_action,
-                failure_example=failure_example,
-                model=model
+                failure_examples=failure_examples,
+                model=model,
+                provider=provider,
+                effort=thinking_effort or "low"
             )
             logger.info(f"Compliance rule reformatted successfully for user_id={current_user['id']}")
             return result
@@ -152,3 +158,4 @@ class ComplianceController:
         except Exception as e:
             logger.exception(f"Unexpected error while formatting compliance rule: {e}")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"LLM formatting error: {str(e)}")
+

@@ -132,12 +132,16 @@ class CallsController:
         ]
 
         llm_model = org["llm_model_routing"] or "openrouter/free"
+        llm_provider = org["llm_provider"] or "openrouter"
+        llm_effort = org["call_eval_effort"] or "medium"
         evaluation_result = LLMService.evaluate(
             model=llm_model,
             company_context=org["company_context"],
             department_context=dept["department_context"],
             parameters=llm_params,
-            transcript=transcript
+            transcript=transcript,
+            provider=llm_provider,
+            effort=llm_effort
         )
         procedure_enquired = evaluation_result.get("procedure_enquired", "General Inquiry")
         eval_items = evaluation_result.get("evaluations", [])

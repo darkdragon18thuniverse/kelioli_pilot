@@ -1,0 +1,8 @@
+{
+    "model": "models/gemini-3.6-flash",
+    "input": "hi\n",
+    "generation_config": {
+        "max_output_tokens": 65536,
+        "thinking_level": "medium"
+    }
+}

@@ -8,6 +8,7 @@ dependencies = [
     "av>=14.0.0",
     "bcrypt>=4.0.0",
     "fastapi[standard]>=0.139.2",
+    "google-genai>=0.1.1",
     "mutagen>=1.47.0",
     "pyjwt>=2.10.0",
     "python-dotenv>=1.0.1",

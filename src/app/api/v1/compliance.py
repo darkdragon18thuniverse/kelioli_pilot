@@ -25,7 +25,8 @@ class ComplianceUpdateSchema(BaseModel):
 class FormatRuleRequestSchema(BaseModel):
     raw_input: str = Field(..., min_length=1, examples=["Agent must verify DOB before disclosing medical info"])
     expected_action: Optional[str] = Field(None, examples=["Agent verifies caller's DOB"])
-    failure_example: Optional[str] = Field(None, examples=["Agent discloses results without verifying DOB"])
+    failure_examples: Optional[List[str]] = Field(None, examples=[["Agent discloses results without verifying DOB"]])
+    thinking_effort: Optional[str] = Field("low", examples=["low", "medium", "high", "minimal"])
 
 # --- Response Schemas ---
 
@@ -48,7 +49,7 @@ class ComplianceListResponseSchema(BaseModel):
 
 class FormatRuleResponseSchema(BaseModel):
     expected_action: str = Field(..., examples=["The agent must verify caller's DOB before disclosing any medical info."])
-    failure_example: str = Field(..., examples=["The agent reads test results to caller without confirming DOB."])
+    failure_examples: List[str] = Field(..., examples=[["The agent reads test results to caller without confirming DOB."]])
 
 # --- Routes ---
 
@@ -61,7 +62,8 @@ def format_compliance_rule(
         current_user=current_user,
         raw_input=payload.raw_input,
         expected_action=payload.expected_action,
-        failure_example=payload.failure_example
+        failure_examples=payload.failure_examples,
+        thinking_effort=payload.thinking_effort
     )
 
 @router.post("/parameters", status_code=status.HTTP_201_CREATED, response_model=StandardResponseSchema)

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, status, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 from src.app.controllers.auth_controller import AuthController
 from src.app.controllers.admin_controller import AdminController
 from src.app.core.constants import (
@@ -20,7 +20,9 @@ class OrganizationCreateSchema(BaseModel):
     tier: str = Field("free", examples=["growth"])
     company_context: Optional[str] = Field(None, examples=["We provide remote medical consultations."])
     stt_model_routing: Optional[str] = Field(None, examples=["sarvam-2"])
+    llm_provider: Optional[Literal["openrouter", "gemini"]] = Field("openrouter", examples=["openrouter", "gemini"])
     llm_model_routing: Optional[str] = Field(None, examples=["openrouter/free"])
+    call_eval_effort: Optional[Literal["minimal", "low", "medium", "high"]] = Field("medium", examples=["medium"])
     default_language: Optional[str] = Field(None, examples=["en-IN"])
     per_minute_cost: float = Field(DEFAULT_PER_MINUTE_COST, examples=[0.15])
     infra_fixed_cost: float = Field(DEFAULT_INFRA_FIXED_COST, examples=[49.00])
@@ -34,7 +36,9 @@ class OrganizationUpdateSchema(BaseModel):
     tier: Optional[str] = None
     company_context: Optional[str] = None
     stt_model_routing: Optional[str] = None
+    llm_provider: Optional[Literal["openrouter", "gemini"]] = None
     llm_model_routing: Optional[str] = None
+    call_eval_effort: Optional[Literal["minimal", "low", "medium", "high"]] = None
     default_language: Optional[str] = None
     per_minute_cost: Optional[float] = None
     infra_fixed_cost: Optional[float] = None
@@ -76,11 +80,21 @@ class UserUpdateSchema(BaseModel):
     password: Optional[str] = Field(None, min_length=8)
 
 
+class FormatContextRequestSchema(BaseModel):
+    context_type: Literal["company", "department"] = Field(..., examples=["company", "department"])
+    raw_input: str = Field(..., min_length=1, examples=["We provide remote medical consultations."])
+    thinking_effort: Optional[str] = Field("low", examples=["low", "medium", "high", "minimal"])
+
+
 # --- Response Schemas ---
 class StandardResponseSchema(BaseModel):
     status: str = Field(..., examples=["success"])
     message: str = Field(..., examples=["Configuration completed successfully."])
     id: Optional[int] = Field(None, examples=[12])
+
+
+class FormatContextResponseSchema(BaseModel):
+    context: str = Field(..., examples=["[Company Overview]\nWe provide remote medical consultations."])
 
 
 class SummaryMetricsResponseSchema(BaseModel):
@@ -97,7 +111,9 @@ class OrganizationRecordSchema(BaseModel):
     tier: str = Field(..., examples=["enterprise"])
     company_context: Optional[str] = Field(None, examples=["We provide remote medical consultations."])
     stt_model_routing: str = Field(..., examples=["sarvam-2"])
+    llm_provider: str = Field("openrouter", examples=["openrouter"])
     llm_model_routing: str = Field(..., examples=["openrouter/free"])
+    call_eval_effort: str = Field("medium", examples=["medium"])
     default_language: Optional[str] = Field(None, examples=["en-IN"])
     per_minute_cost: float = Field(..., examples=[0.0])
     infra_fixed_cost: float = Field(..., examples=[0.0])
@@ -153,7 +169,9 @@ def create_organization(
         tier=payload.tier,
         company_context=payload.company_context,
         stt_model_routing=payload.stt_model_routing,
+        llm_provider=payload.llm_provider,
         llm_model_routing=payload.llm_model_routing,
+        call_eval_effort=payload.call_eval_effort,
         default_language=payload.default_language,
         per_minute_cost=payload.per_minute_cost,
         infra_fixed_cost=payload.infra_fixed_cost,
@@ -289,3 +307,17 @@ def update_user(
         user_id=user_id,
         updates=updates
     )
+
+
+@router.post("/format-context", status_code=status.HTTP_200_OK, response_model=FormatContextResponseSchema)
+def format_context(
+    payload: FormatContextRequestSchema,
+    current_user: Dict[str, Any] = Depends(AuthController.get_current_user_context)
+) -> Dict[str, Any]:
+    return AdminController.format_context(
+        current_user=current_user,
+        context_type=payload.context_type,
+        raw_input=payload.raw_input,
+        thinking_effort=payload.thinking_effort
+    )
+

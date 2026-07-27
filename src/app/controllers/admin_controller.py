@@ -30,7 +30,9 @@ class AdminController:
                             billing_email: Optional[str] = None, tier: str = "free",
                             company_context: Optional[str] = None,
                             stt_model_routing: Optional[str] = None,
+                            llm_provider: Optional[str] = None,
                             llm_model_routing: Optional[str] = None,
+                            call_eval_effort: Optional[str] = None,
                             default_language: Optional[str] = None,
                             per_minute_cost: float = DEFAULT_PER_MINUTE_COST,
                             infra_fixed_cost: float = DEFAULT_INFRA_FIXED_COST,
@@ -55,8 +57,12 @@ class AdminController:
             create_kwargs["status"] = status_val
         if stt_model_routing is not None:
             create_kwargs["stt_model_routing"] = stt_model_routing
+        if llm_provider is not None:
+            create_kwargs["llm_provider"] = llm_provider
         if llm_model_routing is not None:
             create_kwargs["llm_model_routing"] = llm_model_routing
+        if call_eval_effort is not None:
+            create_kwargs["call_eval_effort"] = call_eval_effort
 
         try:
             org_id = Organization.create(**create_kwargs)
@@ -106,6 +112,49 @@ class AdminController:
 
         logger.info(f"Organization org_id={org_id} updated successfully (updated fields: {list(updates.keys())})")
         return {"status": "success", "message": "Organization settings updated successfully."}
+
+    @staticmethod
+    def format_context(current_user: Dict[str, Any], context_type: str, raw_input: str,
+                       thinking_effort: Optional[str] = "low") -> Dict[str, str]:
+        if context_type == "company":
+            AdminController._verify_role(current_user, [ROLES["superadmin"]])
+        elif context_type == "department":
+            AdminController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"]])
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid context_type. Must be 'company' or 'department'."
+            )
+
+        from src.app.services.stt import LLMService
+
+        model = "openrouter/free"
+        provider = "openrouter"
+        org_id = current_user.get("organization_id")
+        if org_id:
+            org = Organization.get_by_id(org_id)
+            if org:
+                if org["llm_model_routing"]:
+                    model = org["llm_model_routing"]
+                if org["llm_provider"]:
+                    provider = org["llm_provider"]
+
+        try:
+            result = LLMService.format_context(
+                raw_input=raw_input,
+                context_type=context_type,
+                model=model,
+                provider=provider,
+                effort=thinking_effort or "low"
+            )
+            logger.info(f"Context reformatted successfully for context_type='{context_type}' by user_id={current_user['id']}")
+            return result
+        except ValueError as e:
+            logger.warning(f"Failed to format context: {e}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        except Exception as e:
+            logger.exception(f"Unexpected error while formatting context: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"LLM formatting error: {str(e)}")
 
     @staticmethod
     def get_admin_summary(current_user: Dict[str, Any]) -> Dict[str, Any]:

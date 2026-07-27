@@ -36,8 +36,10 @@ CREATE TABLE IF NOT EXISTS organizations (
     
     -- Dynamic Multi-Tier AI Service Tier Engines Routing Nodes
     stt_model_routing TEXT NOT NULL DEFAULT 'saaras:v3',         
+    llm_provider TEXT NOT NULL DEFAULT 'openrouter' CHECK (llm_provider IN ('openrouter','gemini')),
     llm_model_routing TEXT NOT NULL DEFAULT 'openrouter/free',
-    company_context TEXT DEFAULT NULL, 
+    call_eval_effort TEXT NOT NULL DEFAULT 'medium' CHECK (call_eval_effort IN ('minimal','low','medium','high')),
+    company_context TEXT DEFAULT NULL,
     default_language TEXT DEFAULT NULL,
     
     -- Pricing & Safeguard Boundaries

@@ -53,6 +53,13 @@ def init_database() -> None:
         cols = [r["name"] for r in cursor.fetchall()]
         if "failed_line_text" not in cols:
             cursor.execute("ALTER TABLE call_evaluations ADD COLUMN failed_line_text TEXT;")
+        
+        cursor.execute("PRAGMA table_info(organizations)")
+        org_cols = [r["name"] for r in cursor.fetchall()]
+        if "llm_provider" not in org_cols:
+            cursor.execute("ALTER TABLE organizations ADD COLUMN llm_provider TEXT NOT NULL DEFAULT 'openrouter' CHECK (llm_provider IN ('openrouter','gemini'));")
+        if "call_eval_effort" not in org_cols:
+            cursor.execute("ALTER TABLE organizations ADD COLUMN call_eval_effort TEXT NOT NULL DEFAULT 'medium' CHECK (call_eval_effort IN ('minimal','low','medium','high'));")
         conn.commit()
         logger.info("Database schema initialized and bootstrapped successfully.")
     except sqlite3.Error as e:

@@ -11,7 +11,8 @@ from src.app.core.constants import (
 class Organization:
     @staticmethod
     def create(name: str, slug: str, billing_email: Optional[str] = None, tier: str = "free",
-               stt_model_routing: str = "sarvam-2", llm_model_routing: str = "openrouter/free",
+               stt_model_routing: str = "sarvam-2", llm_provider: str = "openrouter",
+               llm_model_routing: str = "openrouter/free", call_eval_effort: str = "medium",
                company_context: Optional[str] = None, default_language: Optional[str] = None,
                per_minute_cost: float = DEFAULT_PER_MINUTE_COST,
                infra_fixed_cost: float = DEFAULT_INFRA_FIXED_COST,
@@ -25,13 +26,13 @@ class Organization:
                 update_query = """
                     UPDATE organizations
                     SET name = ?, billing_email = ?, status = ?, tier = ?,
-                        stt_model_routing = ?, llm_model_routing = ?, company_context = ?,
+                        stt_model_routing = ?, llm_provider = ?, llm_model_routing = ?, company_context = ?,
                         default_language = ?, per_minute_cost = ?, infra_fixed_cost = ?
                     WHERE id = ?;
                 """
                 DatabaseManager.execute_update(
                     update_query,
-                    (name.strip(), billing_email, status, tier, stt_model_routing, llm_model_routing, company_context,
+                    (name.strip(), billing_email, status, tier, stt_model_routing, llm_provider, llm_model_routing, company_context,
                      default_language, per_minute_cost, infra_fixed_cost, existing["id"])
                 )
                 return existing["id"]
@@ -39,12 +40,12 @@ class Organization:
 
         query = """
             INSERT INTO organizations (
-                name, slug, billing_email, status, tier, stt_model_routing, llm_model_routing,
+                name, slug, billing_email, status, tier, stt_model_routing, llm_provider, llm_model_routing, call_eval_effort,
                 company_context, default_language, per_minute_cost, infra_fixed_cost, max_monthly_minutes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         return DatabaseManager.execute_update(
-            query, (name.strip(), slug_clean, billing_email, status, tier, stt_model_routing, llm_model_routing,
+            query, (name.strip(), slug_clean, billing_email, status, tier, stt_model_routing, llm_provider, llm_model_routing, call_eval_effort,
                     company_context, default_language, per_minute_cost, infra_fixed_cost, max_monthly_minutes)
         )
 
@@ -81,7 +82,7 @@ class Organization:
     def update(org_id: int, updates: Dict[str, Any]) -> bool:
         allowed_keys = {
             "name", "slug", "status", "tier", "billing_email",
-            "stt_model_routing", "llm_model_routing", "company_context", "default_language",
+            "stt_model_routing", "llm_provider", "llm_model_routing", "call_eval_effort", "company_context", "default_language",
             "per_minute_cost", "infra_fixed_cost", "max_monthly_minutes"
         }
         filtered = {k: v for k, v in updates.items() if k in allowed_keys and v is not None}

@@ -68,7 +68,7 @@ def mock_external_ai_services(monkeypatch):
     def fake_transcribe(file_path: str):
         return dict(MOCK_TRANSCRIPT_RESPONSE)
 
-    def fake_evaluate(model, company_context, department_context, parameters, transcript):
+    def fake_evaluate(model, company_context, department_context, parameters, transcript, **kwargs):
         # Reflect the actual parameter IDs passed in so foreign-key-safe evaluations are produced
         evaluations = []
         for param in (parameters or []):
