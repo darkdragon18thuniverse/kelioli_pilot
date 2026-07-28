@@ -67,8 +67,16 @@ chmod +x makeserver.sh runserver.sh
 ./makeserver.sh
 ```
 
-### 2. Running & Restarting Server (`runserver.sh`)
-Whenever you pull code updates or restart the server, run `runserver.sh`. It will automatically stop any existing instance before starting a fresh one:
+### 2. HTTPS SSL Setup (Let's Encrypt Certbot)
+To issue a free HTTPS SSL certificate on your VM so Nginx natively listens on Port 443 with HTTPS:
+
+```bash
+sudo certbot --nginx -d api.kelioli.curigon.com
+```
+Follow the prompt to agree to terms. Certbot will automatically configure Nginx for HTTPS on Port 443 and auto-renew the certificate!
+
+### 3. Running & Restarting Server (`runserver.sh`)
+Whenever you pull code updates or restart the server, run `runserver.sh`:
 
 ```bash
 ./runserver.sh
