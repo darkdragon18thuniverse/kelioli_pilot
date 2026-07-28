@@ -57,17 +57,23 @@ HTTP_TIMEOUT=15.0
 
 ---
 
-## Running the Application
+## Production Deployment & Systemd Setup (GCP VM)
 
-Start the FastAPI server:
+### 1. One-Command Server Setup (`makeserver.sh`)
+Run this once on your VM to install system packages, Python virtual environment, dependencies, systemd service, and Nginx proxy:
 
 ```bash
-uv run python -m src.app.main
-
+chmod +x makeserver.sh runserver.sh
+./makeserver.sh
 ```
 
-* **API Base URL:** `http://127.0.0.1:8000`
-* **Interactive Docs (Swagger UI):** `http://127.0.0.1:8000/api/docs`
+### 2. Running & Restarting Server (`runserver.sh`)
+Whenever you pull code updates or restart the server, run `runserver.sh`. It will automatically stop any existing instance before starting a fresh one:
+
+```bash
+./runserver.sh
+```
+
 
 ---
 
