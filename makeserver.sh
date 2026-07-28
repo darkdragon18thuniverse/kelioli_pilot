@@ -24,12 +24,13 @@ sudo cp deploy/kelioli.service /etc/systemd/system/kelioli.service
 sudo sed -i "s/ubuntu/$USER/g" /etc/systemd/system/kelioli.service
 sudo systemctl daemon-reload
 
-# 4. Configure Nginx Reverse Proxy
+# 4. Configure Nginx Reverse Proxy (Allowing direct IP & domain access)
 echo "🌐 Configuring Nginx reverse proxy..."
 if [ -f "deploy/nginx.conf" ]; then
+    sudo rm -f /etc/nginx/sites-enabled/default
     sudo cp deploy/nginx.conf /etc/nginx/sites-available/kelioli
-    sudo sed -i 's/api.curigon.com/api.kelioli.curigon.com/g' /etc/nginx/sites-available/kelioli
     sudo ln -sf /etc/nginx/sites-available/kelioli /etc/nginx/sites-enabled/default
+    sudo nginx -t
     sudo systemctl restart nginx
 fi
 
