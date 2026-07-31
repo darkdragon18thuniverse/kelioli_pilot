@@ -74,7 +74,7 @@ def process_monthly_billing_snapshots(reference_date: Optional[datetime.date] = 
 
         logger.info(
             f"BillingSnapshotWorker: Generated snapshot id={snapshot_id} for org_id={org_id}, "
-            f"period={period_start} to {period_end}, minutes={total_mins}, spend=${total_spend}"
+            f"period={period_start} to {period_end}, minutes={total_mins}, spend=₹{total_spend}"
         )
         created_count += 1
 

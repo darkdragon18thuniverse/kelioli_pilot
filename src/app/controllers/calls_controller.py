@@ -113,7 +113,30 @@ class CallsController:
         logger.info(f"Pipeline Execution: Starting STT for call_id={call_id}")
         stt_result = STTService.transcribe(audio_path)
         transcript = stt_result.get("transcript", "")
+        stt_model = stt_result.get("model_used", "saaras:v3")
         logger.info(f"Pipeline Execution: STT completed for call_id={call_id}. Transcript length: {len(transcript)} chars")
+
+        if not transcript or not transcript.strip():
+            err_msg = "Transcription is blank or empty"
+            logger.warning(f"Pipeline Execution: Skipping LLM evaluation for call_id={call_id}: {err_msg}")
+            Call.update_evaluation_results(
+                call_id=call_id,
+                transcript="",
+                duration_seconds=duration_seconds,
+                total_checked=0,
+                total_passed=0,
+                compliance_score_percentage=None,
+                procedure_enquired="N/A",
+                runtime_stt_model=stt_model,
+                processing_status="failed",
+                error_message=err_msg
+            )
+            return {
+                "procedure_enquired": "N/A",
+                "compliance_score_percentage": None,
+                "processing_status": "failed",
+                "error_message": err_msg
+            }
 
         raw_params = ComplianceParameter.list_by_department(org["id"], dept["id"])
         active_params = [dict(p) for p in raw_params if p["is_active"] == 1] if raw_params else []
@@ -583,6 +606,29 @@ class CallsController:
             else:
                 transcript = call_dict.get("transcript", "")
                 stt_model_used = call_dict.get("runtime_stt_model")
+
+            if not transcript or not transcript.strip():
+                err_msg = "Transcription is blank or empty"
+                logger.warning(f"Superadmin Reprocess [{mode}]: Call call_id={call_id} transcription is blank/empty.")
+                Call.update_evaluation_results(
+                    call_id=call_id,
+                    transcript="",
+                    duration_seconds=float(call_dict.get("duration_seconds") or 0.0),
+                    total_checked=0,
+                    total_passed=0,
+                    compliance_score_percentage=None,
+                    procedure_enquired="N/A",
+                    runtime_stt_model=stt_model_used,
+                    runtime_llm_model=call_dict.get("runtime_llm_model"),
+                    processing_status="failed",
+                    error_message=err_msg
+                )
+                updated_call = Call.get_by_id(call_id)
+                return {
+                    "status": "failed",
+                    "message": f"Call #{call_id} transcription is blank or empty.",
+                    "call": dict(updated_call) if updated_call else {}
+                }
 
             # Handle LLM evaluation if requested
             if mode in ["full", "llm"]:

@@ -57,10 +57,13 @@ def startup_event():
         import threading
         from src.app.services.call_queue_worker import run_worker
         from src.app.services.billing_snapshot_worker import run_billing_snapshot_worker
+        from src.app.services.db_backup_worker import run_db_backup_worker
         logger.info("Starting background call queue worker thread.")
         threading.Thread(target=run_worker, daemon=True).start()
         logger.info("Starting background billing snapshot worker thread.")
         threading.Thread(target=run_billing_snapshot_worker, daemon=True).start()
+        logger.info("Starting background DB backup worker thread.")
+        threading.Thread(target=run_db_backup_worker, daemon=True).start()
 
 
 # --- Application Routing Nodes Mount ---
