@@ -511,3 +511,275 @@ class CallsController:
         logger.info(f"Retrieved CSV upload details for upload_id={upload_id}")
         return upload_dict
 
+    @staticmethod
+    def reprocess_single_call(
+        current_user: Dict[str, Any],
+        call_id: int,
+        mode: str = "full",
+        department_id: Optional[int] = None,
+        stt_model: Optional[str] = None,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        llm_effort: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Superadmin method to re-run full pipeline, transcription only, or LLM evaluation only for a call."""
+        CallsController._verify_role(current_user, [ROLES["superadmin"]])
+
+        call = Call.get_by_id(call_id)
+        if not call:
+            logger.warning(f"Superadmin call reprocess failed: call_id={call_id} not found.")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call record not found.")
+
+        call_dict = dict(call)
+        org = Organization.get_by_id(call_dict["organization_id"])
+        if not org:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid organization mapping for call.")
+
+        target_dept_id = department_id or call_dict["department_id"]
+        dept = Department.get_by_id(target_dept_id)
+        if not dept:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Department ID {target_dept_id} not found.")
+
+        # Update department_id on call if Superadmin changed it
+        if target_dept_id != call_dict["department_id"]:
+            from src.app.models.base import DatabaseManager
+            DatabaseManager.execute_update(
+                "UPDATE calls SET department_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (target_dept_id, call_id)
+            )
+            call_dict["department_id"] = target_dept_id
+            logger.info(f"Superadmin updated call_id={call_id} department mapping to department_id={target_dept_id}")
+
+        org_dict = dict(org)
+        dept_dict = dict(dept)
+
+        effective_stt_model = stt_model or org_dict.get("stt_model_routing") or "saaras:v3"
+        effective_llm_provider = llm_provider or org_dict.get("llm_provider") or "openrouter"
+        effective_llm_model = llm_model or org_dict.get("llm_model_routing") or "openrouter/free"
+        effective_llm_effort = llm_effort or org_dict.get("call_eval_effort") or "medium"
+
+        audio_url = call_dict["audio_url"]
+        local_temp_path = None
+
+        try:
+            # Handle audio file retrieval for STT if needed
+            if mode in ["full", "transcription"]:
+                if audio_url.startswith("http://") or audio_url.startswith("https://"):
+                    os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
+                    local_temp_path = os.path.join(TEMP_AUDIO_DIR, f"reprocess_{call_id}_{uuid.uuid4().hex[:8]}.mp3")
+                    with httpx.Client(timeout=30.0) as client:
+                        resp = client.get(audio_url)
+                        resp.raise_for_status()
+                        with open(local_temp_path, "wb") as f:
+                            f.write(resp.content)
+                    audio_target_path = local_temp_path
+                else:
+                    audio_target_path = audio_url
+
+                logger.info(f"Superadmin Reprocess [{mode}]: Transcribing call_id={call_id} using STT model '{effective_stt_model}'")
+                stt_result = STTService.transcribe(audio_target_path)
+                transcript = stt_result.get("transcript", "")
+                stt_model_used = stt_result.get("model_used", effective_stt_model)
+            else:
+                transcript = call_dict.get("transcript", "")
+                stt_model_used = call_dict.get("runtime_stt_model")
+
+            # Handle LLM evaluation if requested
+            if mode in ["full", "llm"]:
+                raw_params = ComplianceParameter.list_by_department(org_dict["id"], dept_dict["id"])
+                active_params = [dict(p) for p in raw_params if p["is_active"] == 1] if raw_params else []
+                llm_params = [
+                    {
+                        "id": p["id"],
+                        "parameter_name": p["parameter_name"],
+                        "rule_description": p["rule_description"],
+                        "severity_level": p["severity_level"]
+                    }
+                    for p in active_params
+                ]
+
+                logger.info(f"Superadmin Reprocess [{mode}]: Evaluating call_id={call_id} against dept_id={dept_dict['id']} using LLM provider '{effective_llm_provider}', model '{effective_llm_model}', effort '{effective_llm_effort}'")
+                evaluation_result = LLMService.evaluate(
+                    model=effective_llm_model,
+                    company_context=org_dict.get("company_context"),
+                    department_context=dept_dict.get("department_context"),
+                    parameters=llm_params,
+                    transcript=transcript,
+                    provider=effective_llm_provider,
+                    effort=effective_llm_effort
+                )
+
+                procedure_enquired = evaluation_result.get("procedure_enquired", call_dict.get("procedure_enquired") or "General Inquiry")
+                eval_items = evaluation_result.get("evaluations", [])
+                passed_count = sum(1 for item in eval_items if item.get("did_follow_rule") == 1)
+                total_checked = len(eval_items)
+                score = (passed_count / total_checked * 100.0) if total_checked > 0 else None
+
+                evaluations_to_save = []
+                for item in eval_items:
+                    param_match = next((p for p in active_params if p["id"] == item["parameter_id"]), None)
+                    snapshot_text = param_match["rule_description"] if param_match else ""
+                    evaluations_to_save.append({
+                        "call_id": call_id,
+                        "parameter_id": item["parameter_id"],
+                        "did_follow_rule": item["did_follow_rule"],
+                        "failure_offset_seconds": None,
+                        "failure_reason": item.get("failure_reason"),
+                        "failed_line_text": item.get("failed_line_text"),
+                        "parameter_snapshot_text": snapshot_text
+                    })
+
+                CallEvaluation.replace_evaluations(call_id, evaluations_to_save)
+
+                prompt_tokens = evaluation_result.get("prompt_tokens", call_dict.get("upstream_tokens_prompt", 0))
+                completion_tokens = evaluation_result.get("completion_tokens", call_dict.get("upstream_tokens_completion", 0))
+                llm_model_used = evaluation_result.get("model_used", effective_llm_model)
+
+                Call.update_evaluation_results(
+                    call_id=call_id,
+                    transcript=transcript,
+                    duration_seconds=float(call_dict.get("duration_seconds") or 0.0),
+                    total_checked=total_checked,
+                    total_passed=passed_count,
+                    compliance_score_percentage=score,
+                    procedure_enquired=procedure_enquired,
+                    upstream_tokens_prompt=prompt_tokens,
+                    upstream_tokens_completion=completion_tokens,
+                    runtime_stt_model=stt_model_used,
+                    runtime_llm_model=llm_model_used,
+                    processing_status="completed"
+                )
+            else:
+                # STT-only reprocess: update transcript and STT model without wiping evaluations
+                from src.app.models.base import DatabaseManager
+                DatabaseManager.execute_update(
+                    """
+                    UPDATE calls SET transcript = ?, runtime_stt_model = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;
+                    """,
+                    (transcript, stt_model_used, call_id)
+                )
+
+            updated_call = Call.get_by_id(call_id)
+            logger.info(f"Superadmin call reprocess completed successfully: call_id={call_id}, mode='{mode}'")
+            return {"status": "success", "message": f"Call #{call_id} reprocessed successfully ({mode}).", "call": dict(updated_call) if updated_call else {}}
+
+        finally:
+            if local_temp_path and os.path.exists(local_temp_path):
+                try:
+                    os.remove(local_temp_path)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def reprocess_batch_calls(
+        current_user: Dict[str, Any],
+        call_ids: List[int],
+        organization_id: int,
+        mode: str = "full",
+        department_id: Optional[int] = None,
+        stt_model: Optional[str] = None,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        llm_effort: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Superadmin method to batch reprocess multiple calls with rate limit error handling."""
+        CallsController._verify_role(current_user, [ROLES["superadmin"]])
+
+        if not call_ids:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="call_ids array cannot be empty.")
+
+        successful_ids = []
+        failed_ids = []
+        errors = []
+
+        for cid in call_ids:
+            try:
+                CallsController.reprocess_single_call(
+                    current_user=current_user,
+                    call_id=cid,
+                    mode=mode,
+                    department_id=department_id,
+                    stt_model=stt_model,
+                    llm_provider=llm_provider,
+                    llm_model=llm_model,
+                    llm_effort=llm_effort
+                )
+                successful_ids.append(cid)
+            except Exception as e:
+                logger.error(f"Error reprocessing call_id={cid} in batch: {e}")
+                failed_ids.append(cid)
+                errors.append(f"Call #{cid}: {str(e)}")
+
+        logger.info(f"Superadmin batch reprocess completed: {len(successful_ids)} succeeded, {len(failed_ids)} failed")
+        return {
+            "status": "completed",
+            "total": len(call_ids),
+            "processed_records": len(successful_ids),
+            "failed_records": len(failed_ids),
+            "successful_call_ids": successful_ids,
+            "failed_call_ids": failed_ids,
+            "errors": errors
+        }
+
+    @staticmethod
+    def manual_update_call(
+        current_user: Dict[str, Any],
+        call_id: int,
+        procedure_enquired: Optional[str] = None,
+        transcript: Optional[str] = None,
+        evaluations: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """Superadmin method to manually override call details, transcript, and rule evaluations."""
+        CallsController._verify_role(current_user, [ROLES["superadmin"]])
+
+        call = Call.get_by_id(call_id)
+        if not call:
+            logger.warning(f"Superadmin manual edit failed: call_id={call_id} not found.")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call record not found.")
+
+        call_dict = dict(call)
+        new_procedure = procedure_enquired if procedure_enquired is not None else call_dict.get("procedure_enquired")
+        new_transcript = transcript if transcript is not None else call_dict.get("transcript")
+
+        total_checked = call_dict.get("total_parameters_checked", 0)
+        total_passed = call_dict.get("total_parameters_passed", 0)
+        score = call_dict.get("compliance_score_percentage")
+
+        if evaluations is not None:
+            formatted_evals = []
+            for ev in evaluations:
+                formatted_evals.append({
+                    "call_id": call_id,
+                    "parameter_id": ev["parameter_id"],
+                    "did_follow_rule": ev.get("did_follow_rule", 1),
+                    "failure_offset_seconds": ev.get("failure_offset_seconds"),
+                    "failure_reason": ev.get("failure_reason"),
+                    "failed_line_text": ev.get("failed_line_text"),
+                    "parameter_snapshot_text": ev.get("parameter_snapshot_text", "")
+                })
+
+            CallEvaluation.replace_evaluations(call_id, formatted_evals)
+            total_checked = len(formatted_evals)
+            total_passed = sum(1 for e in formatted_evals if e.get("did_follow_rule") == 1)
+            score = (total_passed / total_checked * 100.0) if total_checked > 0 else None
+
+        Call.update_evaluation_results(
+            call_id=call_id,
+            transcript=new_transcript or "",
+            duration_seconds=float(call_dict.get("duration_seconds") or 0.0),
+            total_checked=total_checked,
+            total_passed=total_passed,
+            compliance_score_percentage=score,
+            procedure_enquired=new_procedure,
+            upstream_tokens_prompt=call_dict.get("upstream_tokens_prompt", 0),
+            upstream_tokens_completion=call_dict.get("upstream_tokens_completion", 0),
+            runtime_stt_model=call_dict.get("runtime_stt_model"),
+            runtime_llm_model=call_dict.get("runtime_llm_model"),
+            processing_status=call_dict.get("processing_status", "completed")
+        )
+
+        updated_call = CallsController.get_call_details(current_user=current_user, call_id=call_id)
+        logger.info(f"Superadmin manual call update successful for call_id={call_id}")
+        return {"status": "success", "message": f"Call #{call_id} updated successfully.", "call": updated_call}
+
+

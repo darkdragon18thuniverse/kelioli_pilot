@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, status
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 from pydantic import BaseModel, Field
 from src.app.controllers.auth_controller import AuthController
 from src.app.controllers.calls_controller import CallsController
@@ -91,6 +91,37 @@ class CallExportDetailSchema(BaseModel):
 class CallExportResponseSchema(BaseModel):
     calls: List[CallExportDetailSchema]
 
+class CallReprocessRequestSchema(BaseModel):
+    mode: Literal["full", "transcription", "llm"] = "full"
+    department_id: Optional[int] = None
+    stt_model: Optional[str] = None
+    llm_provider: Optional[Literal["openrouter", "gemini"]] = None
+    llm_model: Optional[str] = None
+    llm_effort: Optional[Literal["minimal", "low", "medium", "high"]] = None
+
+class CallBatchReprocessRequestSchema(BaseModel):
+    call_ids: List[int]
+    organization_id: int
+    mode: Literal["full", "transcription", "llm"] = "full"
+    department_id: Optional[int] = None
+    stt_model: Optional[str] = None
+    llm_provider: Optional[Literal["openrouter", "gemini"]] = None
+    llm_model: Optional[str] = None
+    llm_effort: Optional[Literal["minimal", "low", "medium", "high"]] = None
+
+class CallEvaluationEditSchema(BaseModel):
+    parameter_id: int
+    did_follow_rule: int
+    failure_offset_seconds: Optional[int] = None
+    failure_reason: Optional[str] = None
+    failed_line_text: Optional[str] = None
+    parameter_snapshot_text: Optional[str] = None
+
+class CallManualUpdateRequestSchema(BaseModel):
+    procedure_enquired: Optional[str] = None
+    transcript: Optional[str] = None
+    evaluations: Optional[List[CallEvaluationEditSchema]] = None
+
 @router.post("/process-csv", status_code=status.HTTP_202_ACCEPTED, response_model=CSVBatchResponseSchema)
 def upload_and_process_audio_batch(
     file: UploadFile = File(...),
@@ -121,12 +152,62 @@ def get_export_data(
         organization_id=payload.organization_id
     )
 
+@router.post("/batch-reprocess", status_code=status.HTTP_200_OK)
+def reprocess_batch_calls(
+    payload: CallBatchReprocessRequestSchema,
+    current_user: Dict[str, Any] = Depends(AuthController.get_current_user_context)
+) -> Dict[str, Any]:
+    return CallsController.reprocess_batch_calls(
+        current_user=current_user,
+        call_ids=payload.call_ids,
+        organization_id=payload.organization_id,
+        mode=payload.mode,
+        department_id=payload.department_id,
+        stt_model=payload.stt_model,
+        llm_provider=payload.llm_provider,
+        llm_model=payload.llm_model,
+        llm_effort=payload.llm_effort
+    )
+
+@router.post("/{call_id}/reprocess", status_code=status.HTTP_200_OK)
+def reprocess_call(
+    call_id: int,
+    payload: CallReprocessRequestSchema,
+    current_user: Dict[str, Any] = Depends(AuthController.get_current_user_context)
+) -> Dict[str, Any]:
+    return CallsController.reprocess_single_call(
+        current_user=current_user,
+        call_id=call_id,
+        mode=payload.mode,
+        department_id=payload.department_id,
+        stt_model=payload.stt_model,
+        llm_provider=payload.llm_provider,
+        llm_model=payload.llm_model,
+        llm_effort=payload.llm_effort
+    )
+
+@router.patch("/{call_id}/manual-edit", status_code=status.HTTP_200_OK)
+def manual_update_call(
+    call_id: int,
+    payload: CallManualUpdateRequestSchema,
+    current_user: Dict[str, Any] = Depends(AuthController.get_current_user_context)
+) -> Dict[str, Any]:
+    evals = [e.model_dump() for e in payload.evaluations] if payload.evaluations is not None else None
+    return CallsController.manual_update_call(
+        current_user=current_user,
+        call_id=call_id,
+        procedure_enquired=payload.procedure_enquired,
+        transcript=payload.transcript,
+        evaluations=evals
+    )
+
 @router.get("/{call_id}", status_code=status.HTTP_200_OK, response_model=CallDetailSchema)
 def get_call_details(
     call_id: int,
     current_user: Dict[str, Any] = Depends(AuthController.get_current_user_context)
 ) -> Dict[str, Any]:
     return CallsController.get_call_details(current_user=current_user, call_id=call_id)
+
 
 
 

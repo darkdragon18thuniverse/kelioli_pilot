@@ -148,6 +148,27 @@ class CallEvaluation:
         return True
 
     @staticmethod
+    def replace_evaluations(call_id: int, evaluations: List[Dict[str, Any]]) -> bool:
+        """Deletes existing evaluations for call_id and inserts the new list atomically."""
+        delete_query = "DELETE FROM call_evaluations WHERE call_id = ?;"
+        with DatabaseManager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(delete_query, (call_id,))
+            if evaluations:
+                insert_query = """
+                    INSERT INTO call_evaluations (
+                        call_id, parameter_id, did_follow_rule, failure_offset_seconds, failure_reason, failed_line_text, parameter_snapshot_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?);
+                """
+                for ev in evaluations:
+                    cursor.execute(insert_query, (
+                        call_id, ev["parameter_id"], ev["did_follow_rule"],
+                        ev.get("failure_offset_seconds"), ev.get("failure_reason"), ev.get("failed_line_text"), ev.get("parameter_snapshot_text")
+                    ))
+            conn.commit()
+        return True
+
+    @staticmethod
     def list_by_call_id(call_id: int) -> List[sqlite3.Row]:
         query = """
             SELECT ce.*, cp.parameter_name, cp.severity_level
@@ -169,4 +190,6 @@ class CallEvaluation:
             WHERE ce.call_id IN ({placeholders});
         """
         return DatabaseManager.execute_query(query, tuple(call_ids))
+
+
 

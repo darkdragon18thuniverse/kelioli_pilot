@@ -2,6 +2,7 @@ import os
 import time
 import json
 import io
+import re
 import httpx
 import mimetypes
 import threading
@@ -71,10 +72,13 @@ def _dict_to_genai_schema(schema_dict: Dict[str, Any]) -> Any:
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
 BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", 2.0))
 STT_MIN_INTERVAL = float(os.getenv("STT_MIN_INTERVAL", 1.05))
+GEMINI_MIN_INTERVAL = float(os.getenv("GEMINI_MIN_INTERVAL", 2.0))
 
 _last_stt_request_time: float = 0.0
 _stt_rate_limit_lock = threading.Lock()
 
+_last_gemini_request_time: float = 0.0
+_gemini_rate_limit_lock = threading.Lock()
 
 
 def _enforce_rate_limit(min_interval: float = 1.0):
@@ -85,6 +89,57 @@ def _enforce_rate_limit(min_interval: float = 1.0):
         if elapsed < min_interval:
             time.sleep(min_interval - elapsed)
         _last_stt_request_time = time.perf_counter()
+
+
+def _enforce_gemini_rate_limit(min_interval: float = 2.0):
+    global _last_gemini_request_time
+    with _gemini_rate_limit_lock:
+        now = time.perf_counter()
+        elapsed = now - _last_gemini_request_time
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        _last_gemini_request_time = time.perf_counter()
+
+
+def _extract_retry_delay(e: Exception, default_backoff: float) -> float:
+    """
+    Dynamically extracts required retry delay from API rate limit errors (e.g. 429 RESOURCE_EXHAUSTED).
+    Falls back to exponential default_backoff if no explicit retry delay is present.
+    """
+    err_str = str(e)
+
+    # 1. Match 'retryDelay': '54s' or 'retryDelay': '54.635...' or retryDelay="54s"
+    match = re.search(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s?", err_str, re.IGNORECASE)
+    if match:
+        try:
+            return max(float(match.group(1)) + 1.0, default_backoff)
+        except (ValueError, TypeError):
+            pass
+
+    # 2. Match "retry in 54.63s" or "retry in 54s"
+    match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
+    if match:
+        try:
+            return max(float(match.group(1)) + 1.0, default_backoff)
+        except (ValueError, TypeError):
+            pass
+
+    # 3. Match httpx response headers if present
+    if hasattr(e, "response") and getattr(e, "response", None) is not None:
+        response = getattr(e, "response")
+        if hasattr(response, "headers") and response.headers:
+            retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
+            if retry_after:
+                try:
+                    return max(float(retry_after) + 1.0, default_backoff)
+                except (ValueError, TypeError):
+                    pass
+
+    # 4. Generic 429 / RESOURCE_EXHAUSTED fallback
+    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "rate limit" in err_str.lower():
+        return max(30.0, default_backoff)
+
+    return default_backoff
 
 
 def _chunk_audio_bytes(file_bytes: bytes, chunk_duration_sec: float = 29.0):
@@ -145,22 +200,39 @@ def _chunk_audio_bytes(file_bytes: bytes, chunk_duration_sec: float = 29.0):
             yield f"chunk_{current_chunk_index:03d}.{ext}", out_file.read()
 
 
-
 def retry_with_backoff(func):
     def wrapper(*args, **kwargs):
         retries = 0
-        while retries < MAX_RETRIES:
+        max_attempts = MAX_RETRIES
+
+        while retries < max_attempts:
             try:
                 return func(*args, **kwargs)
             except Exception as e:
                 retries += 1
-                sleep_time = BACKOFF_FACTOR ** retries
-                logger.warning(f"External API call failed ({e}). Attempt {retries}/{MAX_RETRIES}. Retrying in {sleep_time}s...")
-                if retries >= MAX_RETRIES:
-                    logger.error(f"External API call failed permanently after {MAX_RETRIES} attempts.")
+                default_sleep = BACKOFF_FACTOR ** retries
+                err_str = str(e)
+
+                is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "rate limit" in err_str.lower()
+                if is_rate_limit:
+                    max_attempts = max(MAX_RETRIES, 5)
+                    sleep_time = _extract_retry_delay(e, default_sleep)
+                    logger.warning(
+                        f"External API Rate Limit (429) encountered ({e}). "
+                        f"Attempt {retries}/{max_attempts}. Dynamic sleep for {sleep_time:.2f}s before retrying..."
+                    )
+                else:
+                    sleep_time = default_sleep
+                    logger.warning(
+                        f"External API call failed ({e}). Attempt {retries}/{max_attempts}. Retrying in {sleep_time:.2f}s..."
+                    )
+
+                if retries >= max_attempts:
+                    logger.error(f"External API call failed permanently after {max_attempts} attempts.")
                     raise
                 time.sleep(sleep_time)
     return wrapper
+
 
 
 class STTService:
@@ -310,6 +382,7 @@ class LLMService:
         effort_val = effort or "high"
 
         if provider == "gemini":
+            _enforce_gemini_rate_limit(min_interval=GEMINI_MIN_INTERVAL)
             key = api_key or os.getenv("GEMINI_API_KEY")
             if not key or key == "mock_key":
                 logger.warning("Gemini LLM is not configured with a valid live production key.")
