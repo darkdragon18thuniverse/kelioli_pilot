@@ -603,6 +603,17 @@ class CallsController:
                 stt_result = STTService.transcribe(audio_target_path)
                 transcript = stt_result.get("transcript", "")
                 stt_model_used = stt_result.get("model_used", effective_stt_model)
+
+                # Persist the transcript immediately, before any LLM evaluation is
+                # attempted. STT is billable work; if the LLM step below fails
+                # (e.g. provider quota exhaustion) we must not discard it.
+                from src.app.models.base import DatabaseManager
+                DatabaseManager.execute_update(
+                    """
+                    UPDATE calls SET transcript = ?, runtime_stt_model = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;
+                    """,
+                    (transcript, stt_model_used, call_id)
+                )
             else:
                 transcript = call_dict.get("transcript", "")
                 stt_model_used = call_dict.get("runtime_stt_model")
@@ -645,15 +656,28 @@ class CallsController:
                 ]
 
                 logger.info(f"Superadmin Reprocess [{mode}]: Evaluating call_id={call_id} against dept_id={dept_dict['id']} using LLM provider '{effective_llm_provider}', model '{effective_llm_model}', effort '{effective_llm_effort}'")
-                evaluation_result = LLMService.evaluate(
-                    model=effective_llm_model,
-                    company_context=org_dict.get("company_context"),
-                    department_context=dept_dict.get("department_context"),
-                    parameters=llm_params,
-                    transcript=transcript,
-                    provider=effective_llm_provider,
-                    effort=effective_llm_effort
-                )
+                try:
+                    evaluation_result = LLMService.evaluate(
+                        model=effective_llm_model,
+                        company_context=org_dict.get("company_context"),
+                        department_context=dept_dict.get("department_context"),
+                        parameters=llm_params,
+                        transcript=transcript,
+                        provider=effective_llm_provider,
+                        effort=effective_llm_effort
+                    )
+                except Exception as e:
+                    # Full provider detail (quota, auth, model name, etc.) is logged
+                    # server-side only. The transcript above is already saved, so a
+                    # retry does not repeat the billable STT step.
+                    logger.error(
+                        f"Superadmin Reprocess [{mode}]: LLM evaluation failed for call_id={call_id} "
+                        f"(provider='{effective_llm_provider}', model='{effective_llm_model}'): {e}"
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Evaluation service is temporarily unavailable. Please try again shortly."
+                    )
 
                 procedure_enquired = evaluation_result.get("procedure_enquired", call_dict.get("procedure_enquired") or "General Inquiry")
                 eval_items = evaluation_result.get("evaluations", [])

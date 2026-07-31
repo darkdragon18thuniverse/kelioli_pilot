@@ -19,7 +19,18 @@ src/app/production.db-shm
 
 # Target generic local databases if any extra testing nodes crop up
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.sqlite3
+.fuse_hidden*
+
+# Automated DB backups — these are full copies of production data and must
+# never be committed (see src/app/services/db_backup_worker.py)
+backups/
+
+# Cross-process advisory lock files (see src/app/core/proc_lock.py)
+locks/
 
 # ==========================================
 # 3. ENVIRONMENT & PACKAGING CONFIGURATIONS
@@ -29,6 +40,9 @@ src/app/production.db-shm
 venv/
 ENV/
 *.env*
+# ...but the placeholder template IS meant to be shared (contains no real
+# secrets — verified) so new config options stay documented for the team.
+!.env.example
 
 # ==========================================
 # 4. SYSTEM SPECIFIC & IDE CONFIGURATIONS

@@ -5,6 +5,7 @@ from typing import Optional
 from src.app.models.organization import Organization
 from src.app.models.billing import Billing
 from src.app.core.logging_config import get_logger
+from src.app.core.proc_lock import try_singleton_lock
 
 logger = get_logger(__name__)
 
@@ -85,13 +86,22 @@ def run_billing_snapshot_worker(check_interval_seconds: float = 3600.0) -> None:
     """
     Main loop for background daemon thread.
     Periodically checks and generates monthly billing snapshots.
+
+    `main.py` starts this loop in every gunicorn worker process. Without
+    serialization, two workers could both read the same "unbilled month" list
+    before either inserts, creating duplicate billing_snapshots rows. A
+    non-blocking cross-process lock ensures only one worker runs a snapshot
+    cycle at a time; the others simply skip and pick it up next cycle, by
+    which point the DB check already reflects the new snapshot.
     """
     logger.info("Billing Snapshot Worker started in background daemon thread.")
     while not _stop_event:
         try:
-            created = process_monthly_billing_snapshots()
-            if created > 0:
-                logger.info(f"Billing Snapshot Worker processed cycle: created {created} new snapshot(s).")
+            with try_singleton_lock("billing_snapshot") as acquired:
+                if acquired:
+                    created = process_monthly_billing_snapshots()
+                    if created > 0:
+                        logger.info(f"Billing Snapshot Worker processed cycle: created {created} new snapshot(s).")
         except Exception as e:
             logger.exception(f"Unexpected error in billing snapshot worker loop: {e}")
 

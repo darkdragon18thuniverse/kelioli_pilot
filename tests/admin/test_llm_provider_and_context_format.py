@@ -161,7 +161,7 @@ def test_llm_service_gemini_provider_dispatch():
          patch("src.app.services.stt.types", mock_types), \
          patch.dict("os.environ", {"GEMINI_API_KEY": "test_gemini_key"}):
 
-        res_text = LLMService._call_llm(
+        res_text, _usage_info = LLMService._call_llm(
             provider="gemini",
             api_key=None,
             selected_model="gemini-2.5-flash",

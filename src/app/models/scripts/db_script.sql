@@ -189,6 +189,14 @@ CREATE TABLE IF NOT EXISTS billing_snapshots (
     FOREIGN KEY(organization_id) REFERENCES organizations(id) ON DELETE CASCADE
 );
 
+-- Cross-process shared state used to throttle outbound calls to external APIs
+-- (Gemini, Sarvam STT, etc.) to a single effective rate regardless of how many
+-- gunicorn worker processes are running.
+CREATE TABLE IF NOT EXISTS rate_limit_state (
+    rate_key TEXT PRIMARY KEY,
+    last_request_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS daily_usage_metrics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     organization_id INTEGER NOT NULL,

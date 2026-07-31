@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 from src.app.models.base import DatabaseManager
 from src.app.core.logging_config import get_logger
+from src.app.core.proc_lock import try_singleton_lock
 
 logger = get_logger(__name__)
 
@@ -79,24 +80,37 @@ def cleanup_old_backups(backups_dir: Path, max_age_days: int = 15) -> int:
     return deleted_count
 
 
+def _backup_already_exists_for(day_prefix: str, backups_dir: Path) -> bool:
+    """Checks the shared backups directory (not process memory) for a backup
+    file already created today, so every gunicorn worker sees the same truth."""
+    if not backups_dir.exists():
+        return False
+    return any(backups_dir.glob(f"backup_{day_prefix}_*.db"))
+
+
 def run_db_backup_worker(check_interval_seconds: float = 60.0) -> None:
     """
     Main loop for background daemon thread.
     Checks time every check_interval_seconds and triggers database backup at 00:00 midnight local time.
+
+    Since `main.py` starts this loop in every gunicorn worker process, a
+    non-blocking cross-process lock (`try_singleton_lock`) ensures only one
+    worker actually performs the backup, and the backups directory itself
+    (rather than a per-process variable) is used to decide whether today's
+    backup already exists, so the other workers correctly skip it.
     """
     logger.info("DB Backup Worker started in background daemon thread.")
-    last_backup_date: Optional[str] = None
 
     while not _stop_event:
         try:
             now = datetime.datetime.now()
-            today_str = now.strftime("%Y-%m-%d")
+            day_prefix = now.strftime("%Y%m%d")
 
-            # Check if midnight local time (hour == 0) and not yet backed up for today
-            if now.hour == 0 and last_backup_date != today_str:
-                logger.info(f"DB Backup Worker: Triggering midnight database backup for {today_str}")
-                perform_db_backup()
-                last_backup_date = today_str
+            if now.hour == 0 and not _backup_already_exists_for(day_prefix, BACKUP_DIR):
+                with try_singleton_lock("db_backup") as acquired:
+                    if acquired and not _backup_already_exists_for(day_prefix, BACKUP_DIR):
+                        logger.info(f"DB Backup Worker: Triggering midnight database backup for {now.strftime('%Y-%m-%d')}")
+                        perform_db_backup()
         except Exception as e:
             logger.exception(f"Unexpected error in DB backup worker loop: {e}")
 

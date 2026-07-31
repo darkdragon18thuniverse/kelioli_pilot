@@ -7,7 +7,7 @@ import httpx
 import mimetypes
 import threading
 import av
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from pydantic import BaseModel, ValidationError
 from src.app.core.logging_config import get_logger
 
@@ -72,33 +72,118 @@ def _dict_to_genai_schema(schema_dict: Dict[str, Any]) -> Any:
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
 BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", 2.0))
 STT_MIN_INTERVAL = float(os.getenv("STT_MIN_INTERVAL", 1.05))
-GEMINI_MIN_INTERVAL = float(os.getenv("GEMINI_MIN_INTERVAL", 2.0))
+# Default assumes gemini-3.5-flash-lite's free-tier cap of 15 requests/minute
+# (60s / 15 = 4s), with a small margin. Override via env var if the org's
+# model/tier changes. This value is now enforced across ALL worker processes
+# (see _acquire_shared_rate_limit_slot), so it reflects the true request rate.
+GEMINI_MIN_INTERVAL = float(os.getenv("GEMINI_MIN_INTERVAL", 4.5))
+# Upper bound on how long a request will wait for a rate limit slot before
+# being allowed through anyway (see _acquire_shared_rate_limit_slot).
+# Kept below nginx's default proxy_read_timeout of 60s so the fail-open path
+# still happens inside the window the client is listening on; waiting longer
+# would just produce a 504 while the worker kept sleeping.
+RATE_LIMIT_MAX_WAIT = float(os.getenv("RATE_LIMIT_MAX_WAIT", 45.0))
 
-_last_stt_request_time: float = 0.0
+# --- OpenRouter data-privacy routing controls ---
+# "deny" = route only to providers that do not store/train on user data.
+# Currently defaults to "allow" so that free models stay routable: most free
+# endpoints are subsidised in exchange for prompt retention/training, and "deny"
+# makes ~10 of the 17 free models unroutable. Flip to "deny" via env (no deploy
+# needed) when moving to paid models such as deepseek/deepseek-v4-flash, where
+# the cheapest provider is already compliant and "deny" costs nothing.
+OPENROUTER_DATA_COLLECTION = os.getenv("OPENROUTER_DATA_COLLECTION", "allow").lower()
+if OPENROUTER_DATA_COLLECTION not in ("deny", "allow"):
+    OPENROUTER_DATA_COLLECTION = "deny"
+# Stricter still: only Zero Data Retention endpoints. Off by default because it
+# materially shrinks the provider pool; enable once routing is confirmed stable.
+OPENROUTER_REQUIRE_ZDR = os.getenv("OPENROUTER_REQUIRE_ZDR", "false").lower() in ("1", "true", "yes")
+
+# NOTE: rate limiting state must be shared across ALL gunicorn worker processes,
+# not just threads within one process, otherwise the effective request rate is
+# multiplied by the worker count. State is therefore kept in SQLite
+# (see `rate_limit_state` table) rather than in a module-level variable.
+# A per-process lock is still used to avoid every thread in a process hammering
+# the DB simultaneously for the same key.
 _stt_rate_limit_lock = threading.Lock()
-
-_last_gemini_request_time: float = 0.0
 _gemini_rate_limit_lock = threading.Lock()
 
 
+def _acquire_shared_rate_limit_slot(rate_key: str, min_interval: float) -> None:
+    """
+    Cross-process rate limiter backed by SQLite.
+
+    Waits until at least `min_interval` seconds have elapsed since the last slot
+    granted for `rate_key` by ANY worker process, then atomically claims a new
+    slot. The wait duration is computed and slept in one go rather than polled,
+    so a gated call costs ~2 DB round-trips instead of one per poll tick — this
+    matters because every worker shares the single SQLite file that also serves
+    all application queries.
+
+    Best-effort by design: if a slot cannot be claimed within
+    RATE_LIMIT_MAX_WAIT the call is allowed through with a warning. Briefly
+    exceeding the client-side interval is preferable to pinning a gunicorn
+    worker indefinitely, and the provider's own 429 plus `retry_with_backoff`
+    remain as the backstop.
+    """
+    if min_interval <= 0:
+        return
+
+    from src.app.models.base import DatabaseManager
+
+    deadline = time.monotonic() + RATE_LIMIT_MAX_WAIT
+
+    while True:
+        now = time.time()
+        with DatabaseManager.get_connection() as conn:
+            row = conn.execute(
+                "SELECT last_request_at FROM rate_limit_state WHERE rate_key = ?;",
+                (rate_key,)
+            ).fetchone()
+
+            wait_for = 0.0
+            if row is not None:
+                # Clamped to min_interval so a clock jump backwards (NTP) or a
+                # bad stored value cannot make us sleep for an unbounded time.
+                wait_for = min(max(min_interval - (now - row["last_request_at"]), 0.0), min_interval)
+
+            if wait_for <= 0.0:
+                # The WHERE clause is the authoritative atomic guard: if another
+                # worker claimed the slot between our SELECT and this INSERT,
+                # rowcount is 0 and we loop to recompute the wait.
+                cursor = conn.execute(
+                    """
+                    INSERT INTO rate_limit_state (rate_key, last_request_at)
+                    VALUES (?, ?)
+                    ON CONFLICT(rate_key) DO UPDATE SET last_request_at = excluded.last_request_at
+                    WHERE excluded.last_request_at - rate_limit_state.last_request_at >= ?
+                    """,
+                    (rate_key, now, min_interval)
+                )
+                if cursor.rowcount > 0:
+                    return
+                # Lost the race; brief pause before recomputing against the
+                # winner's freshly written timestamp.
+                wait_for = 0.05
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                f"Rate limit slot for '{rate_key}' not acquired within {RATE_LIMIT_MAX_WAIT:.0f}s; "
+                f"proceeding without it to avoid blocking the worker."
+            )
+            return
+
+        time.sleep(min(wait_for, remaining))
+
+
 def _enforce_rate_limit(min_interval: float = 1.0):
-    global _last_stt_request_time
     with _stt_rate_limit_lock:
-        now = time.perf_counter()
-        elapsed = now - _last_stt_request_time
-        if elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
-        _last_stt_request_time = time.perf_counter()
+        _acquire_shared_rate_limit_slot("stt_sarvam", min_interval)
 
 
 def _enforce_gemini_rate_limit(min_interval: float = 2.0):
-    global _last_gemini_request_time
     with _gemini_rate_limit_lock:
-        now = time.perf_counter()
-        elapsed = now - _last_gemini_request_time
-        if elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
-        _last_gemini_request_time = time.perf_counter()
+        _acquire_shared_rate_limit_slot("llm_gemini", min_interval)
 
 
 def _extract_retry_delay(e: Exception, default_backoff: float) -> float:
@@ -377,11 +462,29 @@ class LLMService:
     @staticmethod
     def _call_llm(provider: str, api_key: Optional[str], selected_model: str, messages: list,
                   json_schema: Optional[dict] = None, schema_name: str = "eval_schema",
-                  effort: Optional[str] = "high") -> str:
+                  effort: Optional[str] = "high") -> Tuple[str, Dict[str, Any]]:
+        """
+        Returns (content_str, usage_info) where usage_info has keys
+        'prompt_tokens', 'completion_tokens', and 'model_used'.
+        """
         schema_to_use = json_schema if json_schema is not None else EVAL_JSON_SCHEMA
         effort_val = effort or "high"
 
         if provider == "gemini":
+            # DATA PRIVACY (Gemini): there is deliberately no request-level
+            # parameter to opt out of training here — Google does not offer one.
+            # Whether prompts/responses are used to improve Google's products is
+            # determined solely by the project's BILLING TIER:
+            #   * Unpaid/free quota -> Google uses submitted content and
+            #     responses for product improvement, and human reviewers may
+            #     read them. Google's terms state: "Do not submit sensitive,
+            #     confidential, or personal information to the Unpaid Services."
+            #   * Paid tier (Cloud project with an active billing account) ->
+            #     "Google doesn't use your prompts ... or responses to improve
+            #     our products."
+            # Call transcripts processed here contain patient-identifying
+            # information, so this project MUST be on the paid tier.
+            # Ref: https://ai.google.dev/gemini-api/terms
             _enforce_gemini_rate_limit(min_interval=GEMINI_MIN_INTERVAL)
             key = api_key or os.getenv("GEMINI_API_KEY")
             if not key or key == "mock_key":
@@ -415,10 +518,36 @@ class LLMService:
             )
 
             chunks = []
+            usage_info: Dict[str, Any] = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "model_used": selected_model
+            }
             for chunk in response_stream:
                 if hasattr(chunk, "text") and chunk.text:
                     chunks.append(chunk.text)
-            return "".join(chunks)
+                # usage_metadata typically arrives with cumulative totals on
+                # each chunk (finalized on the last one); keep overwriting so
+                # we end up with the final totals for the whole response.
+                chunk_usage = getattr(chunk, "usage_metadata", None)
+                if chunk_usage is not None:
+                    prompt_count = getattr(chunk_usage, "prompt_token_count", None)
+                    if prompt_count is not None:
+                        usage_info["prompt_tokens"] = prompt_count
+                    # Gemini reports reasoning tokens separately in
+                    # thoughts_token_count, NOT inside candidates_token_count.
+                    # Per Google's docs: "When thinking is turned on, response
+                    # pricing is the sum of output tokens and thinking tokens."
+                    # This call always runs with thinking enabled (see
+                    # thinking_config above), so both are summed to get true
+                    # billable output usage. Contrast with the OpenRouter branch
+                    # below, where reasoning is ALREADY inside completion_tokens
+                    # and must not be added again.
+                    completion_count = getattr(chunk_usage, "candidates_token_count", None) or 0
+                    thoughts_count = getattr(chunk_usage, "thoughts_token_count", None) or 0
+                    if completion_count or thoughts_count:
+                        usage_info["completion_tokens"] = completion_count + thoughts_count
+            return "".join(chunks), usage_info
 
         else:  # openrouter branch (default)
             key = api_key or os.getenv("OPENROUTER_API_KEY")
@@ -439,9 +568,24 @@ class LLMService:
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json"
             }
+            # DATA PRIVACY (OpenRouter): unlike Gemini, OpenRouter DOES expose
+            # per-request routing controls. `data_collection: "deny"` restricts
+            # routing to providers that do not store user data non-transiently
+            # or train on it; `zdr: true` further restricts to Zero Data
+            # Retention endpoints. Both narrow the pool of eligible providers,
+            # so they are env-configurable and can be relaxed without a deploy
+            # if a model becomes unroutable.
+            # Ref: https://openrouter.ai/docs/features/provider-routing
+            provider_prefs: Dict[str, Any] = {
+                "data_collection": OPENROUTER_DATA_COLLECTION
+            }
+            if OPENROUTER_REQUIRE_ZDR:
+                provider_prefs["zdr"] = True
+
             payload = {
                 "model": selected_model,
                 "messages": messages,
+                "provider": provider_prefs,
                 "reasoning": {
                     "effort": mapped_effort,
                     "exclude": False
@@ -461,7 +605,13 @@ class LLMService:
                     logger.error(f"OpenRouter LLM HTTP {res.status_code} Error: {res.text}")
                 res.raise_for_status()
                 response_data = res.json()
-                return response_data["choices"][0]["message"]["content"]
+                usage = response_data.get("usage") or {}
+                usage_info = {
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "model_used": response_data.get("model", selected_model)
+                }
+                return response_data["choices"][0]["message"]["content"], usage_info
 
     @staticmethod
     @retry_with_backoff
@@ -486,7 +636,7 @@ class LLMService:
 
         logger.info(f"Initiating LLM rule reformatting using provider '{provider}', model '{selected_model}', effort '{effort}'.")
         start_time = time.perf_counter()
-        content_str = LLMService._call_llm(
+        content_str, _usage_info = LLMService._call_llm(
             provider=provider,
             api_key=None,
             selected_model=selected_model,
@@ -504,7 +654,7 @@ class LLMService:
             validated = FormatRuleLLMResponse.model_validate(parsed)
         except (json.JSONDecodeError, ValidationError) as e:
             logger.warning(f"LLM rule reformatting response failed structural validation, attempting repair: {e}")
-            repair_content = LLMService._call_llm(
+            repair_content, _usage_info = LLMService._call_llm(
                 provider=provider,
                 api_key=None,
                 selected_model=selected_model,
@@ -554,7 +704,7 @@ class LLMService:
 
         logger.info(f"Initiating LLM context reformatting ({context_type}) using provider '{provider}', model '{selected_model}', effort '{effort}'.")
         start_time = time.perf_counter()
-        content_str = LLMService._call_llm(
+        content_str, _usage_info = LLMService._call_llm(
             provider=provider,
             api_key=None,
             selected_model=selected_model,
@@ -572,7 +722,7 @@ class LLMService:
             validated = FormatContextLLMResponse.model_validate(parsed)
         except (json.JSONDecodeError, ValidationError) as e:
             logger.warning(f"LLM context reformatting response failed structural validation, attempting repair: {e}")
-            repair_content = LLMService._call_llm(
+            repair_content, _usage_info = LLMService._call_llm(
                 provider=provider,
                 api_key=None,
                 selected_model=selected_model,
@@ -613,7 +763,7 @@ class LLMService:
 
         logger.info(f"Initiating LLM compliance evaluation using provider '{provider}', model '{selected_model}', effort '{effort_val}' across {len(parameters)} rules.")
         start_time = time.perf_counter()
-        content_str = LLMService._call_llm(
+        content_str, usage_info = LLMService._call_llm(
             provider=provider,
             api_key=None,
             selected_model=selected_model,
@@ -625,13 +775,16 @@ class LLMService:
             schema_name="eval_schema",
             effort=effort_val
         )
+        total_prompt_tokens = usage_info.get("prompt_tokens", 0)
+        total_completion_tokens = usage_info.get("completion_tokens", 0)
+        model_used = usage_info.get("model_used", selected_model)
 
         try:
             parsed = json.loads(content_str)
             validated = EvalResponse.model_validate(parsed)
         except (json.JSONDecodeError, ValidationError) as e:
             logger.warning(f"LLM response failed structural validation, attempting one repair call: {e}")
-            repair_content = LLMService._call_llm(
+            repair_content, repair_usage_info = LLMService._call_llm(
                 provider=provider,
                 api_key=None,
                 selected_model=selected_model,
@@ -643,10 +796,22 @@ class LLMService:
                 schema_name="eval_schema",
                 effort=effort_val
             )
+            # Repair call is a genuine second billable request; accumulate its
+            # tokens on top of the initial call's tokens for accurate tracking.
+            total_prompt_tokens += repair_usage_info.get("prompt_tokens", 0)
+            total_completion_tokens += repair_usage_info.get("completion_tokens", 0)
+            model_used = repair_usage_info.get("model_used", model_used)
             parsed = json.loads(repair_content)
             validated = EvalResponse.model_validate(parsed)
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-        logger.info(f"LLM evaluation completed successfully in {elapsed_ms:.2f}ms")
-        return validated.model_dump()
+        logger.info(
+            f"LLM evaluation completed successfully in {elapsed_ms:.2f}ms "
+            f"(prompt_tokens={total_prompt_tokens}, completion_tokens={total_completion_tokens})"
+        )
+        result = validated.model_dump()
+        result["prompt_tokens"] = total_prompt_tokens
+        result["completion_tokens"] = total_completion_tokens
+        result["model_used"] = model_used
+        return result
 
