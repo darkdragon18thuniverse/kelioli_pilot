@@ -5,6 +5,8 @@ from src.app.core.constants import (
     DEFAULT_PER_MINUTE_COST,
     DEFAULT_INFRA_FIXED_COST,
     DEFAULT_MAX_MONTHLY_MINUTES,
+    DEFAULT_MINUTE_GRACE_LIMIT,
+    DEFAULT_INFRA_GRACE_DAYS,
 )
 
 
@@ -17,6 +19,8 @@ class Organization:
                per_minute_cost: float = DEFAULT_PER_MINUTE_COST,
                infra_fixed_cost: float = DEFAULT_INFRA_FIXED_COST,
                max_monthly_minutes: float = DEFAULT_MAX_MONTHLY_MINUTES,
+               minute_grace_limit: float = DEFAULT_MINUTE_GRACE_LIMIT,
+               infra_grace_days: int = DEFAULT_INFRA_GRACE_DAYS,
                status: str = "active") -> int:
         slug_clean = slug.lower().strip()
         existing = Organization.get_by_slug(slug_clean)
@@ -27,13 +31,14 @@ class Organization:
                     UPDATE organizations
                     SET name = ?, billing_email = ?, status = ?, tier = ?,
                         stt_model_routing = ?, llm_provider = ?, llm_model_routing = ?, company_context = ?,
-                        default_language = ?, per_minute_cost = ?, infra_fixed_cost = ?
+                        default_language = ?, per_minute_cost = ?, infra_fixed_cost = ?,
+                        minute_grace_limit = ?, infra_grace_days = ?
                     WHERE id = ?;
                 """
                 DatabaseManager.execute_update(
                     update_query,
                     (name.strip(), billing_email, status, tier, stt_model_routing, llm_provider, llm_model_routing, company_context,
-                     default_language, per_minute_cost, infra_fixed_cost, existing["id"])
+                     default_language, per_minute_cost, infra_fixed_cost, minute_grace_limit, infra_grace_days, existing["id"])
                 )
                 return existing["id"]
             return existing["id"]
@@ -41,12 +46,14 @@ class Organization:
         query = """
             INSERT INTO organizations (
                 name, slug, billing_email, status, tier, stt_model_routing, llm_provider, llm_model_routing, call_eval_effort,
-                company_context, default_language, per_minute_cost, infra_fixed_cost, max_monthly_minutes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                company_context, default_language, per_minute_cost, infra_fixed_cost, max_monthly_minutes,
+                minute_grace_limit, infra_grace_days
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         return DatabaseManager.execute_update(
             query, (name.strip(), slug_clean, billing_email, status, tier, stt_model_routing, llm_provider, llm_model_routing, call_eval_effort,
-                    company_context, default_language, per_minute_cost, infra_fixed_cost, max_monthly_minutes)
+                    company_context, default_language, per_minute_cost, infra_fixed_cost, max_monthly_minutes,
+                    minute_grace_limit, infra_grace_days)
         )
 
     @staticmethod
@@ -83,7 +90,8 @@ class Organization:
         allowed_keys = {
             "name", "slug", "status", "tier", "billing_email",
             "stt_model_routing", "llm_provider", "llm_model_routing", "call_eval_effort", "company_context", "default_language",
-            "per_minute_cost", "infra_fixed_cost", "max_monthly_minutes"
+            "per_minute_cost", "infra_fixed_cost", "max_monthly_minutes",
+            "minute_grace_limit", "infra_grace_days"
         }
         filtered = {k: v for k, v in updates.items() if k in allowed_keys and v is not None}
         if not filtered:

@@ -49,6 +49,11 @@ def init_database() -> None:
             
         conn.executescript(schema_sql)
         cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(calls)")
+        call_cols = [r["name"] for r in cursor.fetchall()]
+        if "transcript_chunks" not in call_cols:
+            cursor.execute("ALTER TABLE calls ADD COLUMN transcript_chunks TEXT;")
+
         cursor.execute("PRAGMA table_info(call_evaluations)")
         cols = [r["name"] for r in cursor.fetchall()]
         if "failed_line_text" not in cols:
@@ -60,6 +65,10 @@ def init_database() -> None:
             cursor.execute("ALTER TABLE organizations ADD COLUMN llm_provider TEXT NOT NULL DEFAULT 'openrouter' CHECK (llm_provider IN ('openrouter','gemini'));")
         if "call_eval_effort" not in org_cols:
             cursor.execute("ALTER TABLE organizations ADD COLUMN call_eval_effort TEXT NOT NULL DEFAULT 'medium' CHECK (call_eval_effort IN ('minimal','low','medium','high'));")
+        if "minute_grace_limit" not in org_cols:
+            cursor.execute("ALTER TABLE organizations ADD COLUMN minute_grace_limit REAL NOT NULL DEFAULT 20.0;")
+        if "infra_grace_days" not in org_cols:
+            cursor.execute("ALTER TABLE organizations ADD COLUMN infra_grace_days INTEGER NOT NULL DEFAULT 7;")
         conn.commit()
         logger.info("Database schema initialized and bootstrapped successfully.")
     except sqlite3.Error as e:

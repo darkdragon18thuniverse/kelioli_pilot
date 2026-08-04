@@ -2,6 +2,7 @@ import os
 import shutil
 import uuid
 import hashlib
+import json
 import httpx
 from typing import Dict, Any, List, Optional, Tuple
 from fastapi import HTTPException, status, UploadFile
@@ -10,10 +11,11 @@ from src.app.models.organization import Organization
 from src.app.models.department import Department
 from src.app.models.call import Call, CallEvaluation
 from src.app.models.csv_upload import CSVUpload
+from src.app.models.prepaid import Prepaid
 from src.app.services.stt import STTService, LLMService
 from src.app.core.logging_config import get_logger
 from src.app.core.roles import ROLES
-from src.app.core.constants import TEMP_AUDIO_DIR
+from src.app.core.constants import TEMP_AUDIO_DIR, MINIMUM_BILLABLE_MINUTES, prepaid_enforcement_enabled
 
 logger = get_logger(__name__)
 
@@ -46,6 +48,25 @@ class CallsController:
             )
 
     @staticmethod
+    def _enforce_prepaid_balance(org: Dict[str, Any]) -> None:
+        """Blocks call intake with 402 when the org's prepaid state is 'blocked'
+        (§2.4/§2.5). No-ops entirely when PREPAID_ENFORCEMENT_ENABLED=false,
+        which buys the cutover window between deploy and recording opening
+        recharges (see PREPAID_BILLING_PLAN.md §5.3)."""
+        if not prepaid_enforcement_enabled():
+            return
+        grace_limit = float(org.get("minute_grace_limit") or 0.0)
+        infra_grace_days = int(org.get("infra_grace_days") or 0)
+        state_info = Prepaid.get_state(org["id"], grace_limit, infra_grace_days)
+        if state_info["state"] == "blocked":
+            reason = state_info["blocked_reason"] or "Prepaid balance exhausted."
+            logger.warning(f"Call processing blocked: Organization org_id={org['id']} prepaid state is 'blocked' ({reason})")
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail=f"Insufficient prepaid balance: {reason}"
+            )
+
+    @staticmethod
     def _resolve_audio_source(audio_url: str) -> Tuple[str, bool]:
         """
         Resolves an audio_url into a usable local file path.
@@ -74,47 +95,118 @@ class CallsController:
         return audio_url, False
 
     @staticmethod
-    def _get_audio_duration_seconds(local_path: str) -> float:
-        """Reads duration metadata via mutagen. Fails soft (returns 0.0) if unreadable or mutagen missing."""
-        if MutagenFile is None:
-            return 0.0
+    def _get_audio_duration_seconds(local_path: str, call_id: Optional[int] = None, audio_url: Optional[str] = None) -> float:
+        """
+        Resolves audio duration for billing purposes (D4/§2.8). Under prepaid,
+        duration_seconds IS the invoice, so this must not silently return 0.0.
+
+        Resolution order: PyAV primary (same container/demux entry point stt.py
+        already uses for >30s chunking — no new dependency), mutagen fallback.
+        If both fail, returns 0.0 and the caller applies the
+        MINIMUM_BILLABLE_MINUTES floor rather than debiting nothing.
+        """
         try:
-            audio = MutagenFile(local_path)
-            if audio is not None and audio.info is not None:
-                duration = float(audio.info.length)
-                logger.debug(f"Audio file '{local_path}' duration read: {duration:.2f}s")
-                return duration
+            import av
+            with av.open(local_path) as container:
+                if container.duration is not None:
+                    duration = float(container.duration) / 1_000_000.0  # AV_TIME_BASE = microseconds
+                    if duration > 0:
+                        return duration
+                if container.streams.audio:
+                    stream = container.streams.audio[0]
+                    if stream.duration is not None and stream.time_base is not None:
+                        duration = float(stream.duration * stream.time_base)
+                        if duration > 0:
+                            return duration
         except Exception as e:
-            logger.debug(f"Could not read audio duration for '{local_path}': {e}")
+            logger.debug(f"PyAV could not read audio duration for '{local_path}': {e}")
+
+        if MutagenFile is not None:
+            try:
+                audio = MutagenFile(local_path)
+                if audio is not None and audio.info is not None:
+                    duration = float(audio.info.length)
+                    if duration > 0:
+                        logger.debug(f"Audio file '{local_path}' duration read via mutagen fallback: {duration:.2f}s")
+                        return duration
+            except Exception as e:
+                logger.debug(f"Mutagen could not read audio duration for '{local_path}': {e}")
+
+        logger.warning(
+            f"Audio duration unreadable via both PyAV and mutagen for call_id={call_id}, "
+            f"audio_url={audio_url!r} (local_path={local_path!r}); applying the "
+            f"{MINIMUM_BILLABLE_MINUTES}-minute billing floor rather than a free debit."
+        )
         return 0.0
 
     @staticmethod
-    def _check_and_apply_monthly_cap(organization_id: int, max_monthly_minutes: Optional[float]) -> None:
-        """After a call completes, sums this month's usage and flips the org to 'limit_exceeded'
-        if it has crossed max_monthly_minutes. Superadmin resets status back to 'active' manually
-        via the existing update-organization endpoint."""
-        if max_monthly_minutes is None:
-            return
-        total_seconds = Call.get_monthly_duration_seconds(organization_id)
-        total_minutes = total_seconds / 60.0
-        if total_minutes > max_monthly_minutes:
-            logger.warning(f"Organization org_id={organization_id} exceeded monthly limit: consumed {total_minutes:.2f}m / cap {max_monthly_minutes:.2f}m. Updating status to 'limit_exceeded'")
-            Organization.update(organization_id, {"status": "limit_exceeded"})
+    def _match_failed_line_offset(failed_line_text: Optional[str], transcript_chunks: List[Dict[str, Any]]) -> Optional[int]:
+        """
+        Calculates failure_offset_seconds by matching failed_line_text against transcript_chunks.
+        Uses 2-stage matching:
+        Stage 1: Normalized direct substring match.
+        Stage 2: Token-set Jaccard overlap (threshold >= 0.5) to handle chunk boundary splits.
+        """
+        if not failed_line_text or not failed_line_text.strip() or not transcript_chunks:
+            return None
+
+        def norm(text: str) -> str:
+            import re
+            return re.sub(r'[^\w\s]', '', text).strip().lower()
+
+        clean_failed = norm(failed_line_text)
+        if not clean_failed:
+            return None
+
+        # Stage 1: Normalized direct substring match within a chunk
+        for chunk in transcript_chunks:
+            chunk_text_norm = norm(chunk.get("text", ""))
+            if clean_failed in chunk_text_norm:
+                return int(round(chunk.get("start_time", 0.0)))
+
+        # Stage 2: Token-set overlap ratio for boundary splits
+        failed_tokens = set(clean_failed.split())
+        if not failed_tokens:
+            return None
+
+        best_chunk = None
+        best_score = 0.0
+
+        for chunk in transcript_chunks:
+            chunk_tokens = set(norm(chunk.get("text", "")).split())
+            if not chunk_tokens:
+                continue
+            intersection = failed_tokens.intersection(chunk_tokens)
+            score = len(intersection) / float(len(failed_tokens))
+            if score > best_score:
+                best_score = score
+                best_chunk = chunk
+
+        if best_chunk is not None and best_score >= 0.5:
+            return int(round(best_chunk.get("start_time", 0.0)))
+
+        logger.debug(f"Failed line text '{failed_line_text}' could not be matched with >=50% token overlap. Defaulting failure_offset_seconds to None.")
+        return None
 
     @staticmethod
     def _run_evaluation_pipeline(call_id: int, org: Any, dept: Any, audio_path: str) -> Dict[str, Any]:
         """Shared STT + LLM evaluation pipeline used by both single-upload and CSV batch flows."""
-        duration_seconds = CallsController._get_audio_duration_seconds(audio_path)
+        existing_call = Call.get_by_id(call_id)
+        existing_audio_url = existing_call["audio_url"] if existing_call else None
+        duration_seconds = CallsController._get_audio_duration_seconds(audio_path, call_id=call_id, audio_url=existing_audio_url)
         if duration_seconds <= 0.0:
-            existing_call = Call.get_by_id(call_id)
             if existing_call and existing_call["duration_seconds"]:
                 duration_seconds = float(existing_call["duration_seconds"])
+            if duration_seconds <= 0.0:
+                # §2.8 floor: never write a 0.0-minute usage entry for a completed call.
+                duration_seconds = MINIMUM_BILLABLE_MINUTES * 60.0
 
         logger.info(f"Pipeline Execution: Starting STT for call_id={call_id}")
         stt_result = STTService.transcribe(audio_path)
         transcript = stt_result.get("transcript", "")
+        transcript_chunks = stt_result.get("transcript_chunks", [])
         stt_model = stt_result.get("model_used", "saaras:v3")
-        logger.info(f"Pipeline Execution: STT completed for call_id={call_id}. Transcript length: {len(transcript)} chars")
+        logger.info(f"Pipeline Execution: STT completed for call_id={call_id}. Transcript length: {len(transcript)} chars, chunks: {len(transcript_chunks)}")
 
         if not transcript or not transcript.strip():
             err_msg = "Transcription is blank or empty"
@@ -178,13 +270,16 @@ class CallsController:
         for item in eval_items:
             param_match = next((p for p in active_params if p["id"] == item["parameter_id"]), None)
             snapshot_text = param_match["rule_description"] if param_match else ""
+            did_follow = item.get("did_follow_rule", 1)
+            failed_line = item.get("failed_line_text")
+            offset_sec = CallsController._match_failed_line_offset(failed_line, transcript_chunks) if did_follow == 0 else None
             evaluations_to_save.append({
                 "call_id": call_id,
                 "parameter_id": item["parameter_id"],
-                "did_follow_rule": item["did_follow_rule"],
-                "failure_offset_seconds": None,  # STT provides transcript only, no timestamps to base this on
+                "did_follow_rule": did_follow,
+                "failure_offset_seconds": offset_sec,
                 "failure_reason": item.get("failure_reason"),
-                "failed_line_text": item.get("failed_line_text"),
+                "failed_line_text": failed_line,
                 "parameter_snapshot_text": snapshot_text
             })
         if evaluations_to_save:
@@ -194,6 +289,7 @@ class CallsController:
         llm_model_used = evaluation_result.get("model_used", llm_model)
         prompt_tokens = evaluation_result.get("prompt_tokens", 0)
         completion_tokens = evaluation_result.get("completion_tokens", 0)
+        chunks_json = json.dumps(transcript_chunks) if transcript_chunks else None
 
         Call.update_evaluation_results(
             call_id=call_id,
@@ -207,8 +303,19 @@ class CallsController:
             upstream_tokens_completion=completion_tokens,
             runtime_stt_model=stt_model,
             runtime_llm_model=llm_model_used,
-            processing_status="completed"
+            processing_status="completed",
+            transcript_chunks=chunks_json
         )
+
+        # Debit on completion, next to sync_daily_metrics_for_call (which
+        # Call.update_evaluation_results already triggers above). Failed calls
+        # are never charged — this only runs on the success path. Idempotent
+        # via minute_ledger's unique index on call_id (Prepaid.debit_call).
+        billable_minutes = round(duration_seconds / 60.0, 2)
+        if billable_minutes <= 0.0:
+            billable_minutes = MINIMUM_BILLABLE_MINUTES
+        Prepaid.debit_call(organization_id=org["id"], call_id=call_id, minutes=billable_minutes)
+
         return {
             "procedure_enquired": procedure_enquired,
             "compliance_score_percentage": score
@@ -249,6 +356,11 @@ class CallsController:
                 eval_map.setdefault(cid, []).append(r_dict)
             for c in calls:
                 c["evaluations"] = eval_map.get(c["id"], [])
+                if c.get("transcript_chunks") and isinstance(c["transcript_chunks"], str):
+                    try:
+                        c["transcript_chunks"] = json.loads(c["transcript_chunks"])
+                    except Exception:
+                        c["transcript_chunks"] = None
         logger.info(f"Retrieved {len(calls)} call records for user_id={current_user['id']} (effective org={effective_org_id}, dept={effective_dept_id})")
         return {"calls": calls}
 
@@ -271,6 +383,11 @@ class CallsController:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
         eval_rows = CallEvaluation.list_by_call_id(call_id)
         call_dict["evaluations"] = [dict(r) for r in eval_rows] if eval_rows else []
+        if call_dict.get("transcript_chunks") and isinstance(call_dict["transcript_chunks"], str):
+            try:
+                call_dict["transcript_chunks"] = json.loads(call_dict["transcript_chunks"])
+            except Exception:
+                call_dict["transcript_chunks"] = None
         logger.info(f"Retrieved call details for call_id={call_id} with {len(call_dict['evaluations'])} evaluations")
         return call_dict
 
@@ -329,6 +446,7 @@ class CallsController:
                 "parameter_name": r_dict.get("parameter_name"),
                 "severity_level": r_dict.get("severity_level"),
                 "did_follow_rule": r_dict.get("did_follow_rule"),
+                "failure_offset_seconds": r_dict.get("failure_offset_seconds"),
                 "failure_reason": r_dict.get("failure_reason"),
                 "failed_line_text": r_dict.get("failed_line_text"),
             }
@@ -337,10 +455,17 @@ class CallsController:
         export_calls = []
         for cid in call_ids:
             c = fetched_map[cid]
+            chunks_parsed = None
+            if c.get("transcript_chunks") and isinstance(c["transcript_chunks"], str):
+                try:
+                    chunks_parsed = json.loads(c["transcript_chunks"])
+                except Exception:
+                    chunks_parsed = None
             export_item = {
                 "id": c["id"],
                 "created_at": c.get("created_at"),
                 "transcript": c.get("transcript"),
+                "transcript_chunks": chunks_parsed,
                 "procedure_enquired": c.get("procedure_enquired"),
                 "compliance_score_percentage": c.get("compliance_score_percentage"),
                 "department_id": c["department_id"],
@@ -350,7 +475,6 @@ class CallsController:
                 "evaluations": eval_map.get(cid, [])
             }
             export_calls.append(export_item)
-
 
         logger.info(f"Exported data for {len(export_calls)} calls for user_id={current_user['id']}")
         return {"calls": export_calls}
@@ -385,6 +509,11 @@ class CallsController:
                     detail="organization_id column is required in the CSV when uploading as Superadmin."
                 )
             batch_organization_id = int(first_row_org)
+
+        batch_org = Organization.get_by_id(batch_organization_id)
+        if batch_org:
+            CallsController._enforce_prepaid_balance(dict(batch_org))
+
         try:
             csv_upload_id = CSVUpload.create(
                 organization_id=batch_organization_id,
@@ -438,6 +567,13 @@ class CallsController:
                 org_dict = dict(org)
                 if org_dict["status"] != "active":
                     logger.warning(f"CSV Row #{idx} skipped: organization status is '{org_dict['status']}'")
+                    failed_count += 1
+                    CSVUpload.increment_progress(csv_upload_id, is_success=False)
+                    continue
+                try:
+                    CallsController._enforce_prepaid_balance(org_dict)
+                except HTTPException:
+                    logger.warning(f"CSV Row #{idx} skipped: organization org_id={org_id} prepaid balance is blocked")
                     failed_count += 1
                     CSVUpload.increment_progress(csv_upload_id, is_success=False)
                     continue
@@ -833,6 +969,10 @@ class CallsController:
             total_passed = sum(1 for e in formatted_evals if e.get("did_follow_rule") == 1)
             score = (total_passed / total_checked * 100.0) if total_checked > 0 else None
 
+        target_status = call_dict.get("processing_status", "completed")
+        if target_status == "failed" and (new_transcript or evaluations is not None):
+            target_status = "completed"
+
         Call.update_evaluation_results(
             call_id=call_id,
             transcript=new_transcript or "",
@@ -845,7 +985,8 @@ class CallsController:
             upstream_tokens_completion=call_dict.get("upstream_tokens_completion", 0),
             runtime_stt_model=call_dict.get("runtime_stt_model"),
             runtime_llm_model=call_dict.get("runtime_llm_model"),
-            processing_status=call_dict.get("processing_status", "completed")
+            processing_status=target_status,
+            error_message=None if target_status == "completed" else call_dict.get("error_message")
         )
 
         updated_call = CallsController.get_call_details(current_user=current_user, call_id=call_id)

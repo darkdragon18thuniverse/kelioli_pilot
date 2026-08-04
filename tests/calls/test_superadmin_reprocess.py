@@ -228,3 +228,136 @@ def test_superadmin_batch_reprocess(client, superadmin_setup):
     assert data["failed_records"] == 0
 
 
+def test_reprocess_failed_csv_call_syncs_csv_upload_and_daily_metrics(client, superadmin_setup):
+    from src.app.models.csv_upload import CSVUpload
+
+    token = superadmin_setup["super_token"]
+    org_id = superadmin_setup["org_id"]
+    dept_id = superadmin_setup["dept_id"]
+
+    # 1. Create a CSV upload record that failed initially
+    upload_id = CSVUpload.create(
+        organization_id=org_id,
+        user_id=None,
+        filename="test_failed_batch.csv",
+        file_hash="failedhash123",
+        total_records=1
+    )
+    CSVUpload.increment_progress(upload_id, is_success=False)
+    CSVUpload.update_status(upload_id, "failed")
+
+    # Verify initial upload status
+    upload_before = CSVUpload.get_by_id(upload_id)
+    assert upload_before["failed_records"] == 1
+    assert upload_before["processed_records"] == 0
+    assert upload_before["status"] == "failed"
+
+    # 2. Create a call linked to this CSV upload in 'failed' status but with a saved transcript
+    call_id = Call.create(
+        organization_id=org_id,
+        department_id=dept_id,
+        audio_url="https://example.com/failed_call.mp3",
+        csv_upload_id=upload_id,
+        duration_seconds=90.0,
+        procedure_enquired="Consultation"
+    )
+    Call.update_evaluation_results(
+        call_id=call_id,
+        transcript="Hello, thank you for calling. Can I verify your date of birth?",
+        total_checked=0,
+        total_passed=0,
+        compliance_score_percentage=None,
+        processing_status="failed",
+        error_message="STT Service Error"
+    )
+
+    # 3. Reprocess the failed call via Superadmin endpoint
+    res = client.post(
+        f"/api/v1/calls/{call_id}/reprocess",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "mode": "llm",
+            "llm_provider": "openrouter"
+        }
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+
+    # 4. Verify call processing_status is updated to 'completed' and error_message cleared
+    updated_call = Call.get_by_id(call_id)
+    assert updated_call["processing_status"] == "completed"
+    assert updated_call["error_message"] is None
+
+    # 5. Verify csv_uploads telemetry was synced automatically
+    upload_after = CSVUpload.get_by_id(upload_id)
+    assert upload_after["processed_records"] == 1
+    assert upload_after["failed_records"] == 0
+    assert upload_after["status"] == "completed"
+
+
+def test_manual_edit_failed_call_flips_status_and_syncs_csv_upload(client, superadmin_setup):
+    from src.app.models.csv_upload import CSVUpload
+
+    token = superadmin_setup["super_token"]
+    org_id = superadmin_setup["org_id"]
+    dept_id = superadmin_setup["dept_id"]
+    param1_id = superadmin_setup["param1_id"]
+
+    upload_id = CSVUpload.create(
+        organization_id=org_id,
+        user_id=None,
+        filename="test_manual_edit_batch.csv",
+        file_hash="manualedithash456",
+        total_records=1
+    )
+    CSVUpload.increment_progress(upload_id, is_success=False)
+    CSVUpload.update_status(upload_id, "failed")
+
+    call_id = Call.create(
+        organization_id=org_id,
+        department_id=dept_id,
+        audio_url="https://example.com/manual_call.mp3",
+        csv_upload_id=upload_id,
+        duration_seconds=60.0,
+        procedure_enquired="Checkup"
+    )
+    Call.update_evaluation_results(
+        call_id=call_id,
+        transcript="",
+        total_checked=0,
+        total_passed=0,
+        compliance_score_percentage=None,
+        processing_status="failed",
+        error_message="Ingestion Failure"
+    )
+
+    # Superadmin manually updates the failed call
+    res = client.patch(
+        f"/api/v1/calls/{call_id}/manual-edit",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "transcript": "Customer asked about checkup procedure.",
+            "evaluations": [
+                {
+                    "parameter_id": param1_id,
+                    "did_follow_rule": 1
+                }
+            ]
+        }
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+
+    updated_call = Call.get_by_id(call_id)
+    assert updated_call["processing_status"] == "completed"
+    assert updated_call["error_message"] is None
+
+    upload_after = CSVUpload.get_by_id(upload_id)
+    assert upload_after["processed_records"] == 1
+    assert upload_after["failed_records"] == 0
+    assert upload_after["status"] == "completed"
+
+
+

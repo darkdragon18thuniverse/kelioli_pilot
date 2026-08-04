@@ -30,6 +30,12 @@ class CSVUploadSchema(BaseModel):
 class CSVUploadListResponseSchema(BaseModel):
     csv_uploads: List[CSVUploadSchema]
 
+class TranscriptChunkSchema(BaseModel):
+    index: int
+    start_time: float
+    end_time: float
+    text: str
+
 class CallEvaluationSchema(BaseModel):
     id: Optional[int] = None
     call_id: Optional[int] = None
@@ -53,6 +59,7 @@ class CallDetailSchema(BaseModel):
     file_size_bytes: int = 0
     processing_status: str
     transcript: Optional[str] = None
+    transcript_chunks: Optional[List[TranscriptChunkSchema]] = None
     procedure_enquired: Optional[str] = None
     total_parameters_checked: int = 0
     total_parameters_passed: int = 0
@@ -72,6 +79,7 @@ class CallExportEvaluationSchema(BaseModel):
     parameter_name: Optional[str] = None
     severity_level: Optional[str] = None
     did_follow_rule: int
+    failure_offset_seconds: Optional[int] = None
     failure_reason: Optional[str] = None
     failed_line_text: Optional[str] = None
 
@@ -79,6 +87,7 @@ class CallExportDetailSchema(BaseModel):
     id: int
     created_at: Optional[str] = None
     transcript: Optional[str] = None
+    transcript_chunks: Optional[List[TranscriptChunkSchema]] = None
     procedure_enquired: Optional[str] = None
     compliance_score_percentage: Optional[float] = None
     department_id: int

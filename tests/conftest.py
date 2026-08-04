@@ -6,6 +6,14 @@ from fastapi.testclient import TestClient
 os.environ["DATABASE_PATH"] = "test_production.db"
 os.environ.setdefault("SARVAM_API_KEY", "mock_key")
 os.environ.setdefault("OPENROUTER_API_KEY", "mock_key")
+# Prepaid enforcement defaults OFF for the general test suite: the ~127
+# pre-existing tests create orgs and immediately enqueue/process calls with
+# no prepaid recharge on record, which is 'blocked' by design (§2.4 "grace is
+# earned, not granted"). Flipping enforcement on by default would 402/fail
+# almost every pre-existing pipeline test. The dedicated
+# tests/billing/test_prepaid_enforcement.py suite monkeypatches this back to
+# "true" for the specific scenarios that must verify blocking behavior.
+os.environ.setdefault("PREPAID_ENFORCEMENT_ENABLED", "false")
 
 from src.app.core.database import init_database
 from src.app.models.base import DatabaseManager
@@ -94,6 +102,8 @@ def wipe_tables_between_tests():
     with DatabaseManager.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("PRAGMA foreign_keys = OFF;")
+        cursor.execute("DELETE FROM minute_ledger;")
+        cursor.execute("DELETE FROM prepaid_recharges;")
         cursor.execute("DELETE FROM call_evaluations;")
         cursor.execute("DELETE FROM calls;")
         cursor.execute("DELETE FROM csv_uploads;")

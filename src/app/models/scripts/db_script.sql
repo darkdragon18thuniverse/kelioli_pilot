@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS calls (
     internal_execution_cost REAL DEFAULT 0.0,     
     
     transcript TEXT,                              
+    transcript_chunks TEXT DEFAULT NULL,
     total_parameters_checked INTEGER DEFAULT 0,
     total_parameters_passed INTEGER DEFAULT 0,
     compliance_score_percentage REAL DEFAULT 0.0, 
@@ -188,6 +189,59 @@ CREATE TABLE IF NOT EXISTS billing_snapshots (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(organization_id) REFERENCES organizations(id) ON DELETE CASCADE
 );
+
+-- ==========================================
+-- 5b. PREPAID BILLING (recharges + minute ledger)
+-- ==========================================
+
+CREATE TABLE IF NOT EXISTS prepaid_recharges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL,
+    recharge_type TEXT NOT NULL CHECK (recharge_type IN ('infra','minutes')),
+    minutes_purchased REAL,                 -- minutes packs only
+    months_purchased INTEGER,               -- infra only
+    infra_period_start DATE,                -- infra only
+    infra_period_end DATE,                  -- infra only
+    unit_price_at_purchase REAL NOT NULL,   -- per_minute_cost, or infra_fixed_cost per month
+    amount_charged REAL NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'INR',
+    payment_provider TEXT NOT NULL DEFAULT 'manual',
+    payment_reference TEXT,
+    payment_status TEXT NOT NULL DEFAULT 'paid'
+        CHECK (payment_status IN ('pending','paid','failed','refunded')),
+    paid_at TIMESTAMP,
+    notes TEXT,
+    created_by_user_id INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    voided_at TIMESTAMP,
+    voided_by_user_id INTEGER,
+    FOREIGN KEY(organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    FOREIGN KEY(created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS minute_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL,
+    entry_type TEXT NOT NULL CHECK (entry_type IN ('recharge','usage','adjustment','void')),
+    minutes_delta REAL NOT NULL,   -- + credit, - debit
+    balance_after REAL NOT NULL,   -- audit convenience, written in same txn
+    call_id INTEGER,
+    recharge_id INTEGER,
+    note TEXT,
+    created_by_user_id INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    FOREIGN KEY(call_id) REFERENCES calls(id) ON DELETE SET NULL,
+    FOREIGN KEY(recharge_id) REFERENCES prepaid_recharges(id) ON DELETE SET NULL
+);
+
+-- Idempotency: one usage debit per call, one credit per recharge. Non-negotiable.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_call_usage
+    ON minute_ledger(call_id) WHERE entry_type = 'usage' AND call_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_recharge_credit
+    ON minute_ledger(recharge_id) WHERE entry_type = 'recharge' AND recharge_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ledger_org ON minute_ledger(organization_id, id);
+CREATE INDEX IF NOT EXISTS idx_recharges_org ON prepaid_recharges(organization_id, id);
 
 -- Cross-process shared state used to throttle outbound calls to external APIs
 -- (Gemini, Sarvam STT, etc.) to a single effective rate regardless of how many

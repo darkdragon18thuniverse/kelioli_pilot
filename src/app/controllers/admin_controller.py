@@ -10,6 +10,8 @@ from src.app.core.constants import (
     DEFAULT_PER_MINUTE_COST,
     DEFAULT_INFRA_FIXED_COST,
     DEFAULT_MAX_MONTHLY_MINUTES,
+    DEFAULT_MINUTE_GRACE_LIMIT,
+    DEFAULT_INFRA_GRACE_DAYS,
 )
 
 logger = get_logger(__name__)
@@ -37,6 +39,8 @@ class AdminController:
                             per_minute_cost: float = DEFAULT_PER_MINUTE_COST,
                             infra_fixed_cost: float = DEFAULT_INFRA_FIXED_COST,
                             max_monthly_minutes: float = DEFAULT_MAX_MONTHLY_MINUTES,
+                            minute_grace_limit: float = DEFAULT_MINUTE_GRACE_LIMIT,
+                            infra_grace_days: int = DEFAULT_INFRA_GRACE_DAYS,
                             status_val: Optional[str] = None) -> Dict[str, Any]:
         AdminController._verify_role(current_user, [ROLES["superadmin"]])
 
@@ -51,7 +55,8 @@ class AdminController:
             "name": name, "slug": slug, "billing_email": billing_email, "tier": tier,
             "company_context": company_context, "default_language": default_language,
             "per_minute_cost": per_minute_cost, "infra_fixed_cost": infra_fixed_cost,
-            "max_monthly_minutes": max_monthly_minutes
+            "max_monthly_minutes": max_monthly_minutes,
+            "minute_grace_limit": minute_grace_limit, "infra_grace_days": infra_grace_days
         }
         if status_val is not None:
             create_kwargs["status"] = status_val

@@ -6,9 +6,9 @@ from src.app.models.user import User
 from src.app.models.billing import Billing
 
 
-def test_create_billing_snapshot_and_auto_compute_total_spend(client):
-    """Superadmin creates a billing snapshot and server auto-computes total_spend_calculated."""
-    # Setup Superadmin
+def test_post_billing_snapshots_removed(client):
+    """POST /billing/snapshots was retired under prepaid billing (§2.6) — legacy
+    snapshots are now read-only history. The route must no longer exist."""
     User.create(role_id=1, organization_id=None, department_id=None, name="Super Admin", email="super@billing.com", password_raw="Password2026!")
     login_res = client.post("/api/v1/auth/login", data={"username": "super@billing.com", "password": "Password2026!"})
     token = login_res.json()["access_token"]
@@ -30,13 +30,7 @@ def test_create_billing_snapshot_and_auto_compute_total_spend(client):
         json=payload,
         headers={"Authorization": f"Bearer {token}"}
     )
-
-    assert res.status_code == status.HTTP_201_CREATED
-    data = res.json()
-    assert data["status"] == "success"
-    assert "id" in data
-    # 100.0 + (0.50 * 120.0) = 160.0
-    assert data["total_spend_calculated"] == 160.0
+    assert res.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
 
 
 def test_list_and_get_billing_snapshots(client):
@@ -103,8 +97,8 @@ def test_list_and_get_billing_snapshots(client):
     assert single_snap["total_spend_calculated"] == 60.0
 
 
-def test_update_snapshot_payment_status(client):
-    """PUT /api/v1/billing/snapshots/{id} updates payment_status only."""
+def test_put_billing_snapshots_removed(client):
+    """PUT /api/v1/billing/snapshots/{id} was retired — snapshots are read-only history now."""
     org_id = Organization.create(name="Update Org", slug="update-org")
     User.create(role_id=2, organization_id=org_id, department_id=None, name="Org Admin", email="admin@updateorg.com", password_raw="Password2026!")
 
@@ -123,29 +117,20 @@ def test_update_snapshot_payment_status(client):
         payment_status="unpaid"
     )
 
-    # Update to paid
     res = client.put(
         f"/api/v1/billing/snapshots/{snap_id}",
         json={"payment_status": "paid"},
         headers={"Authorization": f"Bearer {token}"}
     )
-    assert res.status_code == status.HTTP_200_OK
-    assert res.json()["status"] == "success"
+    assert res.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
 
-    # Verify update in DB via GET
+    # GET remains unchanged and still readable.
     res_snap = client.get(
         f"/api/v1/billing/snapshots/{snap_id}",
         headers={"Authorization": f"Bearer {token}"}
     )
-    assert res_snap.json()["payment_status"] == "paid"
-
-    # Invalid payment status raises 400
-    res_invalid = client.put(
-        f"/api/v1/billing/snapshots/{snap_id}",
-        json={"payment_status": "invalid_status"},
-        headers={"Authorization": f"Bearer {token}"}
-    )
-    assert res_invalid.status_code == status.HTTP_400_BAD_REQUEST
+    assert res_snap.status_code == status.HTTP_200_OK
+    assert res_snap.json()["payment_status"] == "unpaid"
 
 
 def test_billing_snapshots_rbac_scoping(client):
@@ -184,10 +169,10 @@ def test_billing_snapshots_rbac_scoping(client):
     )
     assert res_get.status_code == status.HTTP_403_FORBIDDEN
 
-    # Admin 1 attempts to update snapshot for Org 2 -> 403
+    # PUT /snapshots/{id} route was removed entirely (retired, read-only history).
     res_put = client.put(
         f"/api/v1/billing/snapshots/{snap2_id}",
         json={"payment_status": "paid"},
         headers={"Authorization": f"Bearer {token}"}
     )
-    assert res_put.status_code == status.HTTP_403_FORBIDDEN
+    assert res_put.status_code == status.HTTP_405_METHOD_NOT_ALLOWED

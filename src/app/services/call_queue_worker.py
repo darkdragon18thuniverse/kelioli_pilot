@@ -6,9 +6,10 @@ from src.app.models.call import Call
 from src.app.models.organization import Organization
 from src.app.models.department import Department
 from src.app.models.csv_upload import CSVUpload
+from src.app.models.prepaid import Prepaid
 from src.app.controllers.calls_controller import CallsController
 from src.app.core.logging_config import get_logger
-from src.app.core.constants import TEMP_AUDIO_DIR
+from src.app.core.constants import TEMP_AUDIO_DIR, prepaid_enforcement_enabled
 
 logger = get_logger(__name__)
 
@@ -63,14 +64,42 @@ def process_next_pending_call() -> bool:
             except Exception as cleanup_err:
                 logger.warning(f"Worker failed cleaning single-upload temp file '{call['audio_url']}': {cleanup_err}")
         if csv_upload_id:
-            CSVUpload.increment_progress(csv_upload_id, is_success=False)
             _check_and_finalize_csv_upload(csv_upload_id)
-        if org_row:
-            CallsController._check_and_apply_monthly_cap(org_id, org_row["max_monthly_minutes"])
         return True
 
     org_dict = dict(org_row)
     dept_dict = dict(dept_row)
+
+    # Re-check prepaid state at pickup (§2.5). A CSV enqueued while balance was
+    # still positive must not be allowed to overdraft past the grace floor —
+    # this per-call check plus the grace floor is what stops a large batch
+    # from running past exhaustion. Blocked calls fail with a clear
+    # error_message rather than crashing the queue or silently skipping.
+    if prepaid_enforcement_enabled():
+        grace_limit = float(org_dict.get("minute_grace_limit") or 0.0)
+        infra_grace_days = int(org_dict.get("infra_grace_days") or 0)
+        state_info = Prepaid.get_state(org_id, grace_limit, infra_grace_days)
+        if state_info["state"] == "blocked":
+            err_msg = "Insufficient prepaid balance"
+            logger.warning(f"Worker: Blocking call_id={call_id} at pickup for org_id={org_id}: {err_msg} ({state_info['blocked_reason']})")
+            Call.update_evaluation_results(
+                call_id=call_id,
+                transcript="",
+                total_checked=0,
+                total_passed=0,
+                compliance_score_percentage=None,
+                processing_status="failed",
+                error_message=err_msg
+            )
+            if call.get("audio_url") and os.path.exists(call["audio_url"]) and TEMP_AUDIO_DIR in call["audio_url"]:
+                try:
+                    os.remove(call["audio_url"])
+                except Exception as cleanup_err:
+                    logger.warning(f"Worker failed cleaning single-upload temp file '{call['audio_url']}': {cleanup_err}")
+            if csv_upload_id:
+                _check_and_finalize_csv_upload(csv_upload_id)
+            return True
+
     resolved_path = None
     is_temp = False
 
@@ -78,8 +107,6 @@ def process_next_pending_call() -> bool:
         resolved_path, is_temp = CallsController._resolve_audio_source(call["audio_url"])
         result = CallsController._run_evaluation_pipeline(call_id, org_dict, dept_dict, resolved_path)
         logger.info(f"Worker successfully completed evaluation for call_id={call_id}")
-        if csv_upload_id:
-            CSVUpload.increment_progress(csv_upload_id, is_success=True)
     except Exception as e:
         logger.exception(f"Worker: Pipeline execution failed for call_id={call_id}: {e}")
         Call.update_evaluation_results(
@@ -91,8 +118,6 @@ def process_next_pending_call() -> bool:
             processing_status="failed",
             error_message=str(e)
         )
-        if csv_upload_id:
-            CSVUpload.increment_progress(csv_upload_id, is_success=False)
     finally:
         # Clean up temporary downloaded remote file or local uploaded file in temp_audio
         if is_temp and resolved_path and os.path.exists(resolved_path):
@@ -109,25 +134,12 @@ def process_next_pending_call() -> bool:
         if csv_upload_id:
             _check_and_finalize_csv_upload(csv_upload_id)
 
-        # Runs for ALL calls (single-file uploads and CSV-batch rows) after each call completes
-        CallsController._check_and_apply_monthly_cap(org_id, org_dict.get("max_monthly_minutes"))
-
     return True
 
 
 def _check_and_finalize_csv_upload(csv_upload_id: int) -> None:
-    upload_row = CSVUpload.get_by_id(csv_upload_id)
-    if not upload_row:
-        return
-    upload = dict(upload_row)
-    processed = upload["processed_records"]
-    failed = upload["failed_records"]
-    total = upload["total_records"]
+    CSVUpload.sync_upload_stats(csv_upload_id)
 
-    if (processed + failed) >= total:
-        final_status = "completed" if failed == 0 else ("failed" if processed == 0 else "completed")
-        CSVUpload.update_status(csv_upload_id, final_status)
-        logger.info(f"Worker: Finalized CSV upload upload_id={csv_upload_id} as '{final_status}' (processed={processed}, failed={failed}, total={total})")
 
 
 def run_worker() -> None:

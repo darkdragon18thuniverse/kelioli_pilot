@@ -7,6 +7,8 @@ from src.app.core.constants import (
     DEFAULT_PER_MINUTE_COST,
     DEFAULT_INFRA_FIXED_COST,
     DEFAULT_MAX_MONTHLY_MINUTES,
+    DEFAULT_MINUTE_GRACE_LIMIT,
+    DEFAULT_INFRA_GRACE_DAYS,
 )
 
 router = APIRouter(prefix="", tags=["Administration"])
@@ -27,6 +29,8 @@ class OrganizationCreateSchema(BaseModel):
     per_minute_cost: float = Field(DEFAULT_PER_MINUTE_COST, examples=[0.15])
     infra_fixed_cost: float = Field(DEFAULT_INFRA_FIXED_COST, examples=[49.00])
     max_monthly_minutes: float = Field(DEFAULT_MAX_MONTHLY_MINUTES, examples=[500.0])
+    minute_grace_limit: float = Field(DEFAULT_MINUTE_GRACE_LIMIT, examples=[20.0])
+    infra_grace_days: int = Field(DEFAULT_INFRA_GRACE_DAYS, examples=[7])
     status: Optional[str] = Field(None, examples=["active", "suspended", "limit_exceeded"])
 
 
@@ -43,6 +47,8 @@ class OrganizationUpdateSchema(BaseModel):
     per_minute_cost: Optional[float] = None
     infra_fixed_cost: Optional[float] = None
     max_monthly_minutes: Optional[float] = None
+    minute_grace_limit: Optional[float] = None
+    infra_grace_days: Optional[int] = None
     status: Optional[str] = Field(None, examples=["active", "suspended", "limit_exceeded"])
 
 
@@ -118,6 +124,8 @@ class OrganizationRecordSchema(BaseModel):
     per_minute_cost: float = Field(..., examples=[0.0])
     infra_fixed_cost: float = Field(..., examples=[0.0])
     max_monthly_minutes: Optional[float] = Field(DEFAULT_MAX_MONTHLY_MINUTES, examples=[50.0])
+    minute_grace_limit: float = Field(DEFAULT_MINUTE_GRACE_LIMIT, examples=[20.0])
+    infra_grace_days: int = Field(DEFAULT_INFRA_GRACE_DAYS, examples=[7])
     status: str = Field("active", examples=["active"])
 
 
@@ -176,6 +184,8 @@ def create_organization(
         per_minute_cost=payload.per_minute_cost,
         infra_fixed_cost=payload.infra_fixed_cost,
         max_monthly_minutes=payload.max_monthly_minutes,
+        minute_grace_limit=payload.minute_grace_limit,
+        infra_grace_days=payload.infra_grace_days,
         status_val=payload.status
     )
 

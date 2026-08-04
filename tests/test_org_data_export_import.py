@@ -62,6 +62,20 @@ def seeded_db(tmp_path):
             "VALUES (4001, 3001, 501, 1, NULL)"
         )
 
+        # Seed prepaid recharge
+        cursor.execute(
+            "INSERT INTO prepaid_recharges (id, organization_id, recharge_type, minutes_purchased, "
+            "unit_price_at_purchase, amount_charged, payment_status, created_by_user_id) "
+            "VALUES (901, 10, 'minutes', 1000.0, 0.5, 500.0, 'paid', 1001)"
+        )
+
+        # Seed minute ledger entry (credit from the recharge above)
+        cursor.execute(
+            "INSERT INTO minute_ledger (id, organization_id, entry_type, minutes_delta, balance_after, "
+            "call_id, recharge_id, note) "
+            "VALUES (1101, 10, 'recharge', 1000.0, 1000.0, NULL, 901, 'Seed recharge credit')"
+        )
+
         # Seed billing snapshot
         cursor.execute(
             "INSERT INTO billing_snapshots (id, organization_id, tier_at_billing, infra_fixed_cost_charged, "
@@ -103,6 +117,14 @@ def test_export_org_data(seeded_db, tmp_path):
     assert tables["call_evaluations"][0]["id"] == 4001
     assert tables["call_evaluations"][0]["call_id"] == 3001
     assert tables["call_evaluations"][0]["parameter_id"] == 501
+    assert len(tables["prepaid_recharges"]) == 1
+    assert tables["prepaid_recharges"][0]["id"] == 901
+    assert tables["prepaid_recharges"][0]["organization_id"] == 10
+    assert tables["prepaid_recharges"][0]["minutes_purchased"] == 1000.0
+    assert len(tables["minute_ledger"]) == 1
+    assert tables["minute_ledger"][0]["id"] == 1101
+    assert tables["minute_ledger"][0]["recharge_id"] == 901
+    assert tables["minute_ledger"][0]["balance_after"] == 1000.0
     assert len(tables["billing_snapshots"]) == 1
     assert tables["billing_snapshots"][0]["id"] == 701
     assert len(tables["daily_usage_metrics"]) == 1
@@ -148,6 +170,8 @@ def test_full_roundtrip_import(seeded_db, tmp_path):
     assert summary["csv_uploads"] == 1
     assert summary["calls"] == 1
     assert summary["call_evaluations"] == 1
+    assert summary["prepaid_recharges"] == 1
+    assert summary["minute_ledger"] == 1
     assert summary["billing_snapshots"] == 1
     assert summary["daily_usage_metrics"] == 1
 
@@ -173,3 +197,19 @@ def test_full_roundtrip_import(seeded_db, tmp_path):
         assert call_row["department_id"] == 101
         assert call_row["user_id"] == 1001
         assert call_row["csv_upload_id"] == 201
+
+        # Prepaid recharge + ledger round-trip (balance/history preserved intact).
+        cursor.execute("SELECT * FROM prepaid_recharges WHERE id = 901")
+        recharge_row = cursor.fetchone()
+        assert recharge_row is not None
+        assert recharge_row["organization_id"] == 10
+        assert recharge_row["minutes_purchased"] == 1000.0
+        assert recharge_row["payment_status"] == "paid"
+
+        cursor.execute("SELECT * FROM minute_ledger WHERE id = 1101")
+        ledger_row = cursor.fetchone()
+        assert ledger_row is not None
+        assert ledger_row["organization_id"] == 10
+        assert ledger_row["recharge_id"] == 901
+        assert ledger_row["minutes_delta"] == 1000.0
+        assert ledger_row["balance_after"] == 1000.0

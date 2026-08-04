@@ -29,6 +29,8 @@ TABLE_ORDER = [
     "csv_uploads",
     "calls",
     "call_evaluations",
+    "prepaid_recharges",
+    "minute_ledger",
     "billing_snapshots",
     "daily_usage_metrics",
 ]

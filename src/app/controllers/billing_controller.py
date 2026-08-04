@@ -1,11 +1,26 @@
+import datetime
 from typing import Dict, Any, List, Optional
 from fastapi import HTTPException, status
 from src.app.models.billing import Billing
 from src.app.models.organization import Organization
+from src.app.models.prepaid import Prepaid
 from src.app.core.logging_config import get_logger
 from src.app.core.roles import ROLES
+from src.app.core.constants import INFRA_MONTH_OPTIONS
 
 logger = get_logger(__name__)
+
+
+def _add_months(start_date: datetime.date, months: int) -> datetime.date:
+    """Adds `months` calendar months to `start_date`, clamping the day if the
+    target month is shorter (e.g. Jan 31 + 1 month -> Feb 28/29)."""
+    total_month_index = start_date.month - 1 + months
+    year = start_date.year + total_month_index // 12
+    month = total_month_index % 12 + 1
+    import calendar
+    last_day_of_target_month = calendar.monthrange(year, month)[1]
+    day = min(start_date.day, last_day_of_target_month)
+    return datetime.date(year, month, day)
 
 
 class BillingController:
@@ -82,99 +97,6 @@ class BillingController:
         return snapshot_dict
 
     @staticmethod
-    def create_snapshot(current_user: Dict[str, Any], snapshot_data: Any) -> Dict[str, Any]:
-        BillingController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"]])
-
-        # Tenant scoping for org admins
-        if current_user["role_id"] == ROLES["admin"] and snapshot_data.organization_id != current_user["organization_id"]:
-            logger.warning(f"Cross-tenant snapshot creation denied for user_id={current_user['id']} targeting org_id={snapshot_data.organization_id}")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Operation Denied: Cannot create billing snapshots for another organization."
-            )
-
-        org = Organization.get_by_id(snapshot_data.organization_id)
-        if not org:
-            logger.warning(f"Snapshot creation failed: Organization org_id={snapshot_data.organization_id} not found.")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Organization record not found."
-            )
-
-        # Server-side calculation of total_spend_calculated for trustworthiness
-        computed_spend = round(
-            snapshot_data.infra_fixed_cost_charged + (snapshot_data.per_minute_cost_charged * snapshot_data.total_minutes_consumed),
-            2
-        )
-
-        snapshot_id = Billing.create_snapshot(
-            organization_id=snapshot_data.organization_id,
-            tier_at_billing=snapshot_data.tier_at_billing,
-            infra_fixed_cost_charged=snapshot_data.infra_fixed_cost_charged,
-            per_minute_cost_charged=snapshot_data.per_minute_cost_charged,
-            total_minutes_consumed=snapshot_data.total_minutes_consumed,
-            total_spend_calculated=computed_spend,
-            billing_period_start=snapshot_data.billing_period_start,
-            billing_period_end=snapshot_data.billing_period_end,
-            payment_status="unpaid"
-        )
-
-        logger.info(f"Billing snapshot created: snapshot_id={snapshot_id}, org_id={snapshot_data.organization_id}, computed_spend={computed_spend}")
-        return {
-            "status": "success",
-            "id": snapshot_id,
-            "total_spend_calculated": computed_spend,
-            "message": "Billing snapshot created successfully."
-        }
-
-    @staticmethod
-    def update_snapshot_payment_status(
-        current_user: Dict[str, Any],
-        snapshot_id: int,
-        payment_status: str
-    ) -> Dict[str, Any]:
-        BillingController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"]])
-
-        snapshot = Billing.get_snapshot_by_id(snapshot_id)
-        if not snapshot:
-            logger.warning(f"Payment status update failed: snapshot_id={snapshot_id} not found.")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Billing snapshot not found."
-            )
-
-        snapshot_dict = dict(snapshot)
-
-        if current_user["role_id"] == ROLES["admin"] and snapshot_dict["organization_id"] != current_user["organization_id"]:
-            logger.warning(f"Cross-tenant snapshot status update denied for snapshot_id={snapshot_id} to user_id={current_user['id']}")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Operation Denied: Cannot update billing snapshots for another organization."
-            )
-
-        valid_statuses = ["unpaid", "paid", "voided", "overdue"]
-        if payment_status not in valid_statuses:
-            logger.warning(f"Invalid payment_status transition attempt: '{payment_status}'")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid payment_status '{payment_status}'. Must be one of: {', '.join(valid_statuses)}."
-            )
-
-        updated = Billing.update_snapshot_payment_status(snapshot_id, payment_status)
-        if not updated:
-            logger.warning(f"Failed to update payment status for snapshot_id={snapshot_id}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to update billing snapshot payment status."
-            )
-
-        logger.info(f"Billing snapshot payment status updated: snapshot_id={snapshot_id} -> '{payment_status}'")
-        return {
-            "status": "success",
-            "message": "Billing snapshot payment status updated successfully."
-        }
-
-    @staticmethod
     def get_usage(
         current_user: Dict[str, Any],
         organization_id: int,
@@ -244,3 +166,240 @@ class BillingController:
                 "total_calls_failed": total_calls_failed
             }
         }
+
+    # ------------------------------------------------------------------
+    # Prepaid billing (§2.6)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _verify_tenant_scope(current_user: Dict[str, Any], organization_id: int) -> None:
+        if current_user["role_id"] != ROLES["superadmin"] and organization_id != current_user["organization_id"]:
+            logger.warning(f"Cross-tenant prepaid billing access denied for user_id={current_user['id']} requesting org_id={organization_id}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Cannot access prepaid billing data outside your organization."
+            )
+
+    @staticmethod
+    def get_balance(current_user: Dict[str, Any], organization_id: int) -> Dict[str, Any]:
+        BillingController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"], ROLES["manager"], ROLES["agent"]])
+        BillingController._verify_tenant_scope(current_user, organization_id)
+
+        org = Organization.get_by_id(organization_id)
+        if not org:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization record not found.")
+        org_dict = dict(org)
+
+        grace_limit = float(org_dict.get("minute_grace_limit") or 0.0)
+        infra_grace_days = int(org_dict.get("infra_grace_days") or 0)
+
+        state_info = Prepaid.get_state(organization_id, grace_limit, infra_grace_days)
+        minute_balance = state_info["minute_balance"]
+        infra_valid_until = state_info["infra_valid_until"]
+
+        minutes_grace_remaining = round(max(0.0, minute_balance + grace_limit), 2)
+
+        infra_days_remaining = None
+        if infra_valid_until is not None:
+            try:
+                valid_until_date = datetime.date.fromisoformat(str(infra_valid_until)[:10])
+                infra_days_remaining = (valid_until_date - datetime.date.today()).days
+            except ValueError:
+                infra_days_remaining = None
+
+        logger.info(f"Retrieved prepaid balance for org_id={organization_id}: balance={minute_balance}, state={state_info['state']}")
+
+        return {
+            "organization_id": organization_id,
+            "minute_balance": minute_balance,
+            "minutes_grace_limit": grace_limit,
+            "minutes_grace_remaining": minutes_grace_remaining,
+            "infra_valid_until": infra_valid_until,
+            "infra_days_remaining": infra_days_remaining,
+            "infra_grace_days": infra_grace_days,
+            "state": state_info["state"],
+            "blocked_reason": state_info["blocked_reason"],
+            "per_minute_cost": float(org_dict.get("per_minute_cost") or 0.0),
+            "infra_fixed_cost": float(org_dict.get("infra_fixed_cost") or 0.0),
+            "currency": "INR",
+        }
+
+    @staticmethod
+    def list_recharges(
+        current_user: Dict[str, Any],
+        organization_id: int,
+        recharge_type: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        BillingController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"], ROLES["manager"], ROLES["agent"]])
+        BillingController._verify_tenant_scope(current_user, organization_id)
+
+        org = Organization.get_by_id(organization_id)
+        if not org:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization record not found.")
+
+        if recharge_type and recharge_type not in ("infra", "minutes"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="recharge_type must be 'infra' or 'minutes'.")
+
+        result = Prepaid.list_recharges(organization_id, recharge_type=recharge_type, limit=limit, offset=offset)
+        recharges = [dict(r) for r in result["recharges"]] if result["recharges"] else []
+        return {"recharges": recharges, "total": result["total"]}
+
+    @staticmethod
+    def create_recharge(current_user: Dict[str, Any], recharge_data: Any) -> Dict[str, Any]:
+        BillingController._verify_role(current_user, [ROLES["superadmin"]])
+
+        org = Organization.get_by_id(recharge_data.organization_id)
+        if not org:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization record not found.")
+        org_dict = dict(org)
+
+        recharge_type = recharge_data.recharge_type
+        if recharge_type not in ("infra", "minutes"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="recharge_type must be 'infra' or 'minutes'.")
+
+        paid_at = recharge_data.paid_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        if recharge_type == "infra":
+            months = recharge_data.months_purchased
+            if months not in INFRA_MONTH_OPTIONS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"months_purchased must be one of {INFRA_MONTH_OPTIONS} for an infra recharge."
+                )
+            unit_price = float(org_dict.get("infra_fixed_cost") or 0.0)
+            amount_charged = round(unit_price * months, 2)
+
+            current_infra_valid_until = Prepaid.get_infra_valid_until(recharge_data.organization_id)
+            today = datetime.date.today()
+            if recharge_data.infra_period_start:
+                start_date = datetime.date.fromisoformat(str(recharge_data.infra_period_start)[:10])
+            elif current_infra_valid_until:
+                start_date = max(today, datetime.date.fromisoformat(str(current_infra_valid_until)[:10]) + datetime.timedelta(days=1))
+            else:
+                start_date = today
+
+            end_date = _add_months(start_date, months)
+
+            result = Prepaid.create_recharge(
+                organization_id=recharge_data.organization_id,
+                recharge_type="infra",
+                unit_price_at_purchase=unit_price,
+                amount_charged=amount_charged,
+                months_purchased=months,
+                infra_period_start=start_date.isoformat(),
+                infra_period_end=end_date.isoformat(),
+                payment_reference=recharge_data.payment_reference,
+                paid_at=paid_at,
+                notes=recharge_data.notes,
+                created_by_user_id=current_user["id"],
+            )
+
+            grace_limit = float(org_dict.get("minute_grace_limit") or 0.0)
+            infra_grace_days = int(org_dict.get("infra_grace_days") or 0)
+            new_state = Prepaid.get_state(recharge_data.organization_id, grace_limit, infra_grace_days)
+
+            logger.info(f"Infra recharge created: recharge_id={result['id']}, org_id={recharge_data.organization_id}, months={months}, amount={amount_charged}")
+            return {
+                "status": "success",
+                "id": result["id"],
+                "amount_charged": amount_charged,
+                "unit_price_at_purchase": unit_price,
+                "infra_period_end": end_date.isoformat(),
+                "new_minute_balance": result["new_minute_balance"],
+                "new_state": new_state["state"],
+            }
+
+        else:  # minutes
+            minutes = recharge_data.minutes_purchased
+            if not minutes or minutes <= 0:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="minutes_purchased must be > 0 for a minutes recharge.")
+
+            unit_price = float(org_dict.get("per_minute_cost") or 0.0)
+            amount_charged = round(unit_price * minutes, 2)
+
+            result = Prepaid.create_recharge(
+                organization_id=recharge_data.organization_id,
+                recharge_type="minutes",
+                unit_price_at_purchase=unit_price,
+                amount_charged=amount_charged,
+                minutes_purchased=round(float(minutes), 2),
+                payment_reference=recharge_data.payment_reference,
+                paid_at=paid_at,
+                notes=recharge_data.notes,
+                created_by_user_id=current_user["id"],
+            )
+
+            grace_limit = float(org_dict.get("minute_grace_limit") or 0.0)
+            infra_grace_days = int(org_dict.get("infra_grace_days") or 0)
+            new_state = Prepaid.get_state(recharge_data.organization_id, grace_limit, infra_grace_days)
+
+            logger.info(f"Minutes recharge created: recharge_id={result['id']}, org_id={recharge_data.organization_id}, minutes={minutes}, amount={amount_charged}")
+            return {
+                "status": "success",
+                "id": result["id"],
+                "amount_charged": amount_charged,
+                "unit_price_at_purchase": unit_price,
+                "new_minute_balance": result["new_minute_balance"],
+                "new_state": new_state["state"],
+            }
+
+    @staticmethod
+    def void_recharge(current_user: Dict[str, Any], recharge_id: int, reason: str) -> Dict[str, Any]:
+        BillingController._verify_role(current_user, [ROLES["superadmin"]])
+
+        recharge = Prepaid.get_recharge(recharge_id)
+        if not recharge:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recharge record not found.")
+
+        if not reason or not reason.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A void reason is required.")
+
+        result = Prepaid.void_recharge(recharge_id, reason=reason, voided_by_user_id=current_user["id"])
+        if result["status"] == "not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recharge record not found.")
+        if result["status"] == "already_voided":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This recharge has already been voided.")
+
+        org = Organization.get_by_id(result["organization_id"])
+        org_dict = dict(org) if org else {}
+        grace_limit = float(org_dict.get("minute_grace_limit") or 0.0)
+        infra_grace_days = int(org_dict.get("infra_grace_days") or 0)
+        new_state = Prepaid.get_state(result["organization_id"], grace_limit, infra_grace_days)
+
+        logger.info(f"Recharge voided: recharge_id={recharge_id}, org_id={result['organization_id']}, reversal_ledger_id={result['reversal_ledger_id']}")
+        return {
+            "status": "success",
+            "id": recharge_id,
+            "reversal_ledger_id": result["reversal_ledger_id"],
+            "new_minute_balance": result["new_minute_balance"],
+            "new_state": new_state["state"],
+        }
+
+    @staticmethod
+    def list_ledger(
+        current_user: Dict[str, Any],
+        organization_id: int,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        entry_type: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        BillingController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"], ROLES["manager"], ROLES["agent"]])
+        BillingController._verify_tenant_scope(current_user, organization_id)
+
+        org = Organization.get_by_id(organization_id)
+        if not org:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization record not found.")
+
+        if entry_type and entry_type not in ("recharge", "usage", "adjustment", "void"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid entry_type filter.")
+
+        result = Prepaid.list_ledger(
+            organization_id, start_date=start_date, end_date=end_date,
+            entry_type=entry_type, limit=limit, offset=offset
+        )
+        entries = [dict(r) for r in result["entries"]] if result["entries"] else []
+        return {"entries": entries, "total": result["total"], "minute_balance": result["minute_balance"]}

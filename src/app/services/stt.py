@@ -230,7 +230,7 @@ def _extract_retry_delay(e: Exception, default_backoff: float) -> float:
 def _chunk_audio_bytes(file_bytes: bytes, chunk_duration_sec: float = 29.0):
     """
     Slices audio bytes into <=29s chunks using PyAV at packet-level without decoding to raw PCM.
-    Yields (filename, chunk_bytes) tuple.
+    Yields (filename, chunk_bytes, start_time_sec, end_time_sec) tuple.
     """
     input_file = io.BytesIO(file_bytes)
 
@@ -247,7 +247,9 @@ def _chunk_audio_bytes(file_bytes: bytes, chunk_duration_sec: float = 29.0):
 
         current_chunk_index = 1
         chunk_start_ts = 0
+        current_chunk_start_sec = 0.0
         packet_count = 0
+        last_packet_pts = 0
 
         def create_output_container():
             out_file = io.BytesIO()
@@ -258,14 +260,18 @@ def _chunk_audio_bytes(file_bytes: bytes, chunk_duration_sec: float = 29.0):
         out_file, out_container, out_stream = create_output_container()
 
         for packet in in_container.demux(in_stream):
+            if packet.pts is not None:
+                last_packet_pts = packet.pts
             if packet.pts is not None and (packet.pts - chunk_start_ts) >= chunk_duration_ts:
                 if packet_count > 0:
                     out_container.close()
                     out_file.seek(0)
-                    yield f"chunk_{current_chunk_index:03d}.{ext}", out_file.read()
+                    chunk_end_sec = round(packet.pts * time_base, 2)
+                    yield f"chunk_{current_chunk_index:03d}.{ext}", out_file.read(), current_chunk_start_sec, chunk_end_sec
 
                     current_chunk_index += 1
                     chunk_start_ts = packet.pts
+                    current_chunk_start_sec = chunk_end_sec
                     packet_count = 0
 
                     out_file, out_container, out_stream = create_output_container()
@@ -282,7 +288,14 @@ def _chunk_audio_bytes(file_bytes: bytes, chunk_duration_sec: float = 29.0):
         if packet_count > 0:
             out_container.close()
             out_file.seek(0)
-            yield f"chunk_{current_chunk_index:03d}.{ext}", out_file.read()
+            chunk_end_sec = round((chunk_start_ts + (last_packet_pts - chunk_start_ts if last_packet_pts > chunk_start_ts else 0)) * time_base, 2)
+            if in_container.duration is not None:
+                container_dur = round(float(in_container.duration) / 1_000_000.0, 2)
+                if container_dur > 0 and chunk_end_sec > container_dur:
+                    chunk_end_sec = container_dur
+            if chunk_end_sec <= current_chunk_start_sec:
+                chunk_end_sec = round(current_chunk_start_sec + chunk_duration_sec, 2)
+            yield f"chunk_{current_chunk_index:03d}.{ext}", out_file.read(), current_chunk_start_sec, chunk_end_sec
 
 
 def retry_with_backoff(func):
@@ -323,7 +336,7 @@ def retry_with_backoff(func):
 class STTService:
     @staticmethod
     @retry_with_backoff
-    def transcribe(file_path: str) -> Dict[str, Any]:
+    def transcribe(file_path: str, duration_seconds: Optional[float] = None) -> Dict[str, Any]:
         api_key = os.getenv("SARVAM_API_KEY")
         if not api_key or api_key == "mock_key":
             logger.warning("SARVAM_API_KEY is not configured with a valid live production key.")
@@ -346,10 +359,21 @@ class STTService:
         logger.info(f"Split {file_path} into {len(chunks)} chunk(s) using PyAV.")
 
         chunk_transcripts = []
+        transcript_chunks = []
         first_res_json = None
 
         with httpx.Client(timeout=120.0) as client:
-            for idx, (filename, chunk_bytes) in enumerate(chunks, 1):
+            for idx, chunk_item in enumerate(chunks, 1):
+                if len(chunk_item) >= 4:
+                    filename, chunk_bytes, start_sec, end_sec = chunk_item[0], chunk_item[1], chunk_item[2], chunk_item[3]
+                else:
+                    filename, chunk_bytes = chunk_item[0], chunk_item[1]
+                    start_sec = round((idx - 1) * 29.0, 2)
+                    end_sec = round(idx * 29.0, 2)
+
+                if duration_seconds and duration_seconds > 0 and end_sec > duration_seconds:
+                    end_sec = round(duration_seconds, 2)
+
                 _enforce_rate_limit(min_interval=STT_MIN_INTERVAL)
 
                 mime_type, _ = mimetypes.guess_type(filename)
@@ -370,7 +394,6 @@ class STTService:
                     logger.error(f"Sarvam STT HTTP {res.status_code} Error on chunk {idx}/{len(chunks)}: {res.text}")
                 res.raise_for_status()
 
-
                 res_json = res.json()
                 if first_res_json is None:
                     first_res_json = res_json
@@ -378,6 +401,19 @@ class STTService:
                 chunk_text = res_json.get("transcript", "").strip()
                 if chunk_text:
                     chunk_transcripts.append(chunk_text)
+                    transcript_chunks.append({
+                        "index": idx,
+                        "start_time": start_sec,
+                        "end_time": end_sec,
+                        "text": chunk_text
+                    })
+                else:
+                    transcript_chunks.append({
+                        "index": idx,
+                        "start_time": start_sec,
+                        "end_time": end_sec,
+                        "text": ""
+                    })
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         combined_transcript = " ".join(chunk_transcripts)
@@ -385,6 +421,7 @@ class STTService:
 
         final_result = first_res_json.copy() if first_res_json else {}
         final_result["transcript"] = combined_transcript
+        final_result["transcript_chunks"] = transcript_chunks
         final_result["model_used"] = "saaras:v3"
         return final_result
 

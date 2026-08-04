@@ -38,10 +38,12 @@ class Call:
                                   runtime_stt_model: Optional[str] = None,
                                   runtime_llm_model: Optional[str] = None,
                                   processing_status: str = "completed",
-                                  error_message: Optional[str] = None) -> bool:
+                                  error_message: Optional[str] = None,
+                                  transcript_chunks: Optional[str] = None) -> bool:
         query = """
             UPDATE calls SET
                 transcript = ?,
+                transcript_chunks = ?,
                 duration_seconds = ?,
                 total_parameters_checked = ?,
                 total_parameters_passed = ?,
@@ -58,7 +60,7 @@ class Call:
         """
         updated = DatabaseManager.execute_update(
             query, (
-                transcript, duration_seconds, total_checked, total_passed, compliance_score_percentage,
+                transcript, transcript_chunks, duration_seconds, total_checked, total_passed, compliance_score_percentage,
                 procedure_enquired, upstream_tokens_prompt, upstream_tokens_completion,
                 runtime_stt_model, runtime_llm_model, processing_status, error_message, call_id
             )
@@ -66,6 +68,11 @@ class Call:
         if updated:
             from src.app.models.billing import Billing
             Billing.sync_daily_metrics_for_call(call_id)
+
+            call_row = Call.get_by_id(call_id)
+            if call_row and call_row["csv_upload_id"]:
+                from src.app.models.csv_upload import CSVUpload
+                CSVUpload.sync_upload_stats(call_row["csv_upload_id"])
         return updated
 
     @staticmethod
