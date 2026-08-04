@@ -26,6 +26,41 @@ def _immediate_connection() -> sqlite3.Connection:
     return conn
 
 
+def add_months(start_date: datetime.date, months: int) -> datetime.date:
+    """Adds `months` calendar months to `start_date`, clamping the day if the
+    target month is shorter (e.g. Jan 31 + 1 month -> Feb 28/29)."""
+    import calendar
+    total_month_index = start_date.month - 1 + months
+    year = start_date.year + total_month_index // 12
+    month = total_month_index % 12 + 1
+    last_day_of_target_month = calendar.monthrange(year, month)[1]
+    day = min(start_date.day, last_day_of_target_month)
+    return datetime.date(year, month, day)
+
+
+def infra_period_for(months: int, current_valid_until: Optional[str],
+                     explicit_start: Optional[str] = None,
+                     today: Optional[datetime.date] = None) -> tuple:
+    """
+    Computes the (start, end) ISO dates for an infra pack of `months`, stacking
+    on top of `current_valid_until` rather than overlapping it.
+
+    infra_period_end is INCLUSIVE — get_state expires an org only once
+    `today > valid_until` — so the last covered day is the day BEFORE the month
+    anniversary. Without that -1 day a 1-month pack covers 32 days and each
+    stacked renewal (which begins at end + 1 day) slips a further day later.
+    """
+    today = today or datetime.date.today()
+    if explicit_start:
+        start = datetime.date.fromisoformat(str(explicit_start)[:10])
+    elif current_valid_until:
+        start = max(today, datetime.date.fromisoformat(str(current_valid_until)[:10]) + datetime.timedelta(days=1))
+    else:
+        start = today
+    end = add_months(start, months) - datetime.timedelta(days=1)
+    return start.isoformat(), end.isoformat()
+
+
 class Prepaid:
     """
     Prepaid billing: recharges (infra / minute packs) and the append-only
@@ -58,12 +93,36 @@ class Prepaid:
         """
         Inserts the recharge row. If it is a 'minutes' recharge that is paid
         (and not voided), also credits the ledger in the same BEGIN IMMEDIATE
-        transaction. Returns {"id": ..., "new_minute_balance": ...}.
+        transaction.
+
+        For an infra recharge with no explicit infra_period_end, the stacking
+        window is computed HERE, inside the transaction, from the org's current
+        validity. Computing it in the controller (outside any lock) let two
+        concurrent recharges read the same valid_until and write overlapping
+        periods — the org pays twice and gets one period's coverage.
+
+        Returns {"id", "new_minute_balance", "infra_period_start", "infra_period_end"}.
         """
         conn = _immediate_connection()
         try:
             conn.execute("BEGIN IMMEDIATE;")
             cursor = conn.cursor()
+
+            if recharge_type == "infra" and infra_period_end is None and months_purchased:
+                row = cursor.execute(
+                    """
+                    SELECT MAX(infra_period_end) AS valid_until FROM prepaid_recharges
+                    WHERE organization_id = ? AND recharge_type = 'infra'
+                      AND payment_status = 'paid' AND voided_at IS NULL;
+                    """,
+                    (organization_id,),
+                ).fetchone()
+                infra_period_start, infra_period_end = infra_period_for(
+                    months=months_purchased,
+                    current_valid_until=row["valid_until"] if row else None,
+                    explicit_start=infra_period_start,
+                )
+
             cursor.execute(
                 """
                 INSERT INTO prepaid_recharges (
@@ -96,7 +155,12 @@ class Prepaid:
                 new_balance = round(float(row["bal"] or 0.0), 2)
 
             conn.commit()
-            return {"id": recharge_id, "new_minute_balance": new_balance}
+            return {
+                "id": recharge_id,
+                "new_minute_balance": new_balance,
+                "infra_period_start": infra_period_start,
+                "infra_period_end": infra_period_end,
+            }
         except Exception:
             conn.rollback()
             raise

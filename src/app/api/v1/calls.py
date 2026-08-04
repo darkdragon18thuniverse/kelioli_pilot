@@ -140,14 +140,20 @@ def upload_and_process_audio_batch(
 
 @router.get("", status_code=status.HTTP_200_OK, response_model=CallListResponseSchema)
 def list_calls(
-    organization_id: Optional[int] = None,
-    department_id: Optional[int] = None,
+    organization_id: Optional[int] = Query(None, description="Filter by Organization ID"),
+    department_id: Optional[int] = Query(None, description="Filter by Department ID"),
+    start_date: Optional[str] = Query(None, description="Filter calls created on or after start_date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="Filter calls created on or before end_date (YYYY-MM-DD)"),
+    search: Optional[str] = Query(None, description="Search keyword matching procedure or transcript"),
     current_user: Dict[str, Any] = Depends(AuthController.get_current_user_context)
 ) -> Dict[str, Any]:
     return CallsController.list_calls(
         current_user=current_user,
         organization_id=organization_id,
-        department_id=department_id
+        department_id=department_id,
+        start_date=start_date,
+        end_date=end_date,
+        search=search
     )
 
 @router.post("/export-data", status_code=status.HTTP_200_OK, response_model=CallExportResponseSchema)

@@ -4,6 +4,42 @@ from src.app.models.organization import Organization
 from src.app.models.department import Department
 from src.app.models.user import User
 from src.app.models.billing import Billing
+from src.app.models.base import DatabaseManager
+
+
+def seed_snapshot(
+    organization_id: int,
+    tier_at_billing: str,
+    infra_fixed_cost_charged: float,
+    per_minute_cost_charged: float,
+    total_minutes_consumed: float,
+    total_spend_calculated: float,
+    billing_period_start: str,
+    billing_period_end: str,
+    payment_status: str = "unpaid",
+) -> int:
+    """
+    Test-only seeder for legacy postpaid history.
+
+    Deliberately a raw INSERT rather than a model method: there is no snapshot
+    write path in application code any more (prepaid owns all charging), and
+    these tests only need rows to exist so the read-only GET routes have
+    something to return. Do not promote this back into src/.
+    """
+    return DatabaseManager.execute_update(
+        """
+        INSERT INTO billing_snapshots (
+            organization_id, tier_at_billing, infra_fixed_cost_charged,
+            per_minute_cost_charged, total_minutes_consumed, total_spend_calculated,
+            billing_period_start, billing_period_end, payment_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            organization_id, tier_at_billing, infra_fixed_cost_charged,
+            per_minute_cost_charged, total_minutes_consumed, total_spend_calculated,
+            billing_period_start, billing_period_end, payment_status,
+        ),
+    )
 
 
 def test_post_billing_snapshots_removed(client):
@@ -41,7 +77,7 @@ def test_list_and_get_billing_snapshots(client):
     login_res = client.post("/api/v1/auth/login", data={"username": "admin@listorg.com", "password": "Password2026!"})
     token = login_res.json()["access_token"]
 
-    snap1_id = Billing.create_snapshot(
+    snap1_id = seed_snapshot(
         organization_id=org_id,
         tier_at_billing="free",
         infra_fixed_cost_charged=0.0,
@@ -53,7 +89,7 @@ def test_list_and_get_billing_snapshots(client):
         payment_status="paid"
     )
 
-    snap2_id = Billing.create_snapshot(
+    snap2_id = seed_snapshot(
         organization_id=org_id,
         tier_at_billing="growth",
         infra_fixed_cost_charged=50.0,
@@ -105,7 +141,7 @@ def test_put_billing_snapshots_removed(client):
     login_res = client.post("/api/v1/auth/login", data={"username": "admin@updateorg.com", "password": "Password2026!"})
     token = login_res.json()["access_token"]
 
-    snap_id = Billing.create_snapshot(
+    snap_id = seed_snapshot(
         organization_id=org_id,
         tier_at_billing="enterprise",
         infra_fixed_cost_charged=500.0,
@@ -143,7 +179,7 @@ def test_billing_snapshots_rbac_scoping(client):
     login_res = client.post("/api/v1/auth/login", data={"username": "admin1@orgone.com", "password": "Password2026!"})
     token = login_res.json()["access_token"]
 
-    snap2_id = Billing.create_snapshot(
+    snap2_id = seed_snapshot(
         organization_id=org2_id,
         tier_at_billing="growth",
         infra_fixed_cost_charged=100.0,

@@ -3,7 +3,7 @@ from typing import Dict, Any, List, Optional
 from fastapi import HTTPException, status
 from src.app.models.billing import Billing
 from src.app.models.organization import Organization
-from src.app.models.prepaid import Prepaid
+from src.app.models.prepaid import Prepaid, add_months
 from src.app.core.logging_config import get_logger
 from src.app.core.roles import ROLES
 from src.app.core.constants import INFRA_MONTH_OPTIONS
@@ -11,16 +11,10 @@ from src.app.core.constants import INFRA_MONTH_OPTIONS
 logger = get_logger(__name__)
 
 
-def _add_months(start_date: datetime.date, months: int) -> datetime.date:
-    """Adds `months` calendar months to `start_date`, clamping the day if the
-    target month is shorter (e.g. Jan 31 + 1 month -> Feb 28/29)."""
-    total_month_index = start_date.month - 1 + months
-    year = start_date.year + total_month_index // 12
-    month = total_month_index % 12 + 1
-    import calendar
-    last_day_of_target_month = calendar.monthrange(year, month)[1]
-    day = min(start_date.day, last_day_of_target_month)
-    return datetime.date(year, month, day)
+# Infra period arithmetic lives in models.prepaid alongside the write it guards,
+# so the stacking window can be computed inside create_recharge's transaction.
+# Re-exported here for any existing importer of billing_controller._add_months.
+_add_months = add_months
 
 
 class BillingController:
@@ -271,25 +265,17 @@ class BillingController:
             unit_price = float(org_dict.get("infra_fixed_cost") or 0.0)
             amount_charged = round(unit_price * months, 2)
 
-            current_infra_valid_until = Prepaid.get_infra_valid_until(recharge_data.organization_id)
-            today = datetime.date.today()
-            if recharge_data.infra_period_start:
-                start_date = datetime.date.fromisoformat(str(recharge_data.infra_period_start)[:10])
-            elif current_infra_valid_until:
-                start_date = max(today, datetime.date.fromisoformat(str(current_infra_valid_until)[:10]) + datetime.timedelta(days=1))
-            else:
-                start_date = today
-
-            end_date = _add_months(start_date, months)
-
+            # infra_period_end is left to create_recharge, which derives the
+            # stacking window inside its BEGIN IMMEDIATE so two concurrent
+            # recharges cannot claim overlapping periods.
             result = Prepaid.create_recharge(
                 organization_id=recharge_data.organization_id,
                 recharge_type="infra",
                 unit_price_at_purchase=unit_price,
                 amount_charged=amount_charged,
                 months_purchased=months,
-                infra_period_start=start_date.isoformat(),
-                infra_period_end=end_date.isoformat(),
+                infra_period_start=recharge_data.infra_period_start,
+                infra_period_end=None,
                 payment_reference=recharge_data.payment_reference,
                 paid_at=paid_at,
                 notes=recharge_data.notes,
@@ -300,13 +286,13 @@ class BillingController:
             infra_grace_days = int(org_dict.get("infra_grace_days") or 0)
             new_state = Prepaid.get_state(recharge_data.organization_id, grace_limit, infra_grace_days)
 
-            logger.info(f"Infra recharge created: recharge_id={result['id']}, org_id={recharge_data.organization_id}, months={months}, amount={amount_charged}")
+            logger.info(f"Infra recharge created: recharge_id={result['id']}, org_id={recharge_data.organization_id}, months={months}, amount={amount_charged}, period={result['infra_period_start']}..{result['infra_period_end']}")
             return {
                 "status": "success",
                 "id": result["id"],
                 "amount_charged": amount_charged,
                 "unit_price_at_purchase": unit_price,
-                "infra_period_end": end_date.isoformat(),
+                "infra_period_end": result["infra_period_end"],
                 "new_minute_balance": result["new_minute_balance"],
                 "new_state": new_state["state"],
             }

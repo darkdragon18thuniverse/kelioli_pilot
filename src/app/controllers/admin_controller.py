@@ -1,9 +1,11 @@
 from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, status
 from src.app.models.organization import Organization
 from src.app.models.department import Department
 from src.app.models.user import User
 from src.app.models.base import DatabaseManager
+from src.app.models.dashboard import Dashboard
 from src.app.core.logging_config import get_logger
 from src.app.core.roles import ROLES
 from src.app.core.constants import (
@@ -12,6 +14,7 @@ from src.app.core.constants import (
     DEFAULT_MAX_MONTHLY_MINUTES,
     DEFAULT_MINUTE_GRACE_LIMIT,
     DEFAULT_INFRA_GRACE_DAYS,
+    DEFAULT_TARGET_COMPLIANCE_SCORE,
 )
 
 logger = get_logger(__name__)
@@ -41,6 +44,7 @@ class AdminController:
                             max_monthly_minutes: float = DEFAULT_MAX_MONTHLY_MINUTES,
                             minute_grace_limit: float = DEFAULT_MINUTE_GRACE_LIMIT,
                             infra_grace_days: int = DEFAULT_INFRA_GRACE_DAYS,
+                            target_compliance_score: float = DEFAULT_TARGET_COMPLIANCE_SCORE,
                             status_val: Optional[str] = None) -> Dict[str, Any]:
         AdminController._verify_role(current_user, [ROLES["superadmin"]])
 
@@ -56,7 +60,8 @@ class AdminController:
             "company_context": company_context, "default_language": default_language,
             "per_minute_cost": per_minute_cost, "infra_fixed_cost": infra_fixed_cost,
             "max_monthly_minutes": max_monthly_minutes,
-            "minute_grace_limit": minute_grace_limit, "infra_grace_days": infra_grace_days
+            "minute_grace_limit": minute_grace_limit, "infra_grace_days": infra_grace_days,
+            "target_compliance_score": target_compliance_score
         }
         if status_val is not None:
             create_kwargs["status"] = status_val
@@ -417,3 +422,148 @@ class AdminController:
 
         logger.info(f"User profile updated successfully: user_id={user_id}, updated_fields={sanitized_updates_keys}")
         return {"status": "success", "message": "User profile updated successfully."}
+
+    # ------------------------------------------------------------------
+    # Org-admin dashboard ("Performance & Compliance" section)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_dashboard_period(period: str = "30d", start_date: Optional[str] = None, end_date: Optional[str] = None):
+        """
+        Resolves period token or explicit start_date/end_date strings into
+        (start, end, prev_start, prev_end, label) date objects. `prev_*` is the
+        immediately preceding window of equal length, used for KPI "vs previous period" deltas.
+        """
+        today = datetime.now(timezone.utc).date()
+        period_days = {"7d": 7, "30d": 30, "90d": 90}
+
+        if start_date and end_date:
+            try:
+                start = datetime.strptime(start_date.strip(), "%Y-%m-%d").date()
+                end = datetime.strptime(end_date.strip(), "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid start_date or end_date format. Must be YYYY-MM-DD."
+                )
+            if start > end:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="start_date cannot be later than end_date."
+                )
+            label = f"{start.isoformat()} to {end.isoformat()}"
+        elif period == "month":
+            start = today.replace(day=1)
+            end = today
+            label = "This month"
+        elif period in period_days:
+            days = period_days[period]
+            end = today
+            start = end - timedelta(days=days - 1)
+            label = f"Last {days} days"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid period. Must be one of: 7d, 30d, 90d, month or specify start_date and end_date."
+            )
+
+        window_length_days = (end - start).days + 1
+        prev_end = start - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=window_length_days - 1)
+
+        return start, end, prev_start, prev_end, label
+
+    @staticmethod
+    def _resolve_score_trend_weeks(end: Any) -> List[Dict[str, str]]:
+        """Builds 12 trailing weekly (7-day) buckets ending at `end`, oldest first."""
+        weeks = []
+        for i in range(11, -1, -1):
+            week_end = end - timedelta(days=7 * i)
+            week_start = week_end - timedelta(days=6)
+            weeks.append({
+                "label": f"W{12 - i}",
+                "start": week_start.isoformat(),
+                "end": week_end.isoformat(),
+            })
+        return weeks
+
+    @staticmethod
+    def get_dashboard(current_user: Dict[str, Any], period: str = "30d",
+                       organization_id: Optional[int] = None,
+                       start_date: Optional[str] = None,
+                       end_date: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Builds the org-admin "Performance & Compliance" dashboard. RBAC mirrors
+        CallsController.list_calls: admin/manager/agent are pinned to their own
+        organization_id from the JWT; superadmin must supply organization_id.
+        """
+        AdminController._verify_role(
+            current_user, [ROLES["superadmin"], ROLES["admin"], ROLES["manager"], ROLES["agent"]]
+        )
+
+        effective_org_id = organization_id
+        if current_user["role_id"] in [ROLES["admin"], ROLES["manager"], ROLES["agent"]]:
+            effective_org_id = current_user["organization_id"]
+        if current_user["role_id"] == ROLES["superadmin"] and effective_org_id is None:
+            logger.warning("Superadmin dashboard query missing organization_id filter.")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="organization_id is required when viewing the dashboard as Superadmin."
+            )
+
+        org = Organization.get_by_id(effective_org_id)
+        target_compliance_score = (
+            org["target_compliance_score"] if org and org["target_compliance_score"] is not None
+            else DEFAULT_TARGET_COMPLIANCE_SCORE
+        )
+
+        start, end, prev_start, prev_end, label = AdminController._resolve_dashboard_period(period, start_date, end_date)
+        start_s, end_s = start.isoformat(), end.isoformat()
+        prev_start_s, prev_end_s = prev_start.isoformat(), prev_end.isoformat()
+
+        current_score = Dashboard.get_avg_score_and_count(effective_org_id, start_s, end_s)
+        prev_score = Dashboard.get_avg_score_and_count(effective_org_id, prev_start_s, prev_end_s)
+        critical_stats = Dashboard.get_failure_stats_for_severity(effective_org_id, "critical", start_s, end_s)
+        critical_stats_prev = Dashboard.get_failure_stats_for_severity(effective_org_id, "critical", prev_start_s, prev_end_s)
+
+        agent_performance = Dashboard.get_agent_performance(effective_org_id, start_s, end_s)
+        agents_below_target = sum(
+            1 for a in agent_performance if a["avg_score"] is not None and a["avg_score"] < target_compliance_score
+        )
+        agents_unscored = sum(1 for a in agent_performance if a["avg_score"] is None)
+
+        kpis = {
+            "avg_compliance_score": current_score["avg_score"],
+            "avg_compliance_score_prev": prev_score["avg_score"],
+            "critical_failures_count": critical_stats["failure_count"],
+            "critical_failures_count_prev": critical_stats_prev["failure_count"],
+            "critical_failures_rule_count": critical_stats["rule_count"],
+            "critical_failures_agent_count": critical_stats["agent_count"],
+            "agents_below_target_count": agents_below_target,
+            "agents_total_count": Dashboard.get_agents_total_count(effective_org_id),
+            "agents_unscored_count": agents_unscored,
+            "calls_audited_count": Dashboard.get_calls_audited_count(effective_org_id, start_s, end_s),
+            "calls_audited_count_prev": Dashboard.get_calls_audited_count(effective_org_id, prev_start_s, prev_end_s),
+            "minutes_processed": Dashboard.get_minutes_processed(effective_org_id, start_s, end_s),
+        }
+
+        score_trend_weeks = AdminController._resolve_score_trend_weeks(end)
+        score_trend = Dashboard.get_score_trend(effective_org_id, score_trend_weeks)
+
+        logger.info(
+            f"Built org dashboard for org_id={effective_org_id}, period={period} ({start_s}..{end_s}), "
+            f"requested_by=user_id={current_user['id']}"
+        )
+
+        return {
+            "period": {"start": start_s, "end": end_s, "label": label},
+            "target_compliance_score": target_compliance_score,
+            "kpis": kpis,
+            "score_trend": score_trend,
+            "severity_breakdown": Dashboard.get_severity_breakdown(effective_org_id, start_s, end_s),
+            "rules_by_failure_rate": Dashboard.get_rules_by_failure_rate(effective_org_id, start_s, end_s, prev_start_s, prev_end_s),
+            "agent_performance": agent_performance,
+            "critical_failures_feed": Dashboard.get_critical_failures_feed(effective_org_id, start_s, end_s),
+            "topic_breakdown": Dashboard.get_topic_breakdown(effective_org_id, start_s, end_s),
+            "department_coverage": Dashboard.get_department_coverage(effective_org_id, start_s, end_s),
+            "processing_health": Dashboard.get_processing_health(effective_org_id, start_s, end_s),
+        }

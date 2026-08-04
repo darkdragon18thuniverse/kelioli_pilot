@@ -9,6 +9,12 @@ from src.app.services.stt import STTService, _chunk_audio_bytes, _enforce_rate_l
 _REAL_TRANSCRIBE = STTService.__dict__["transcribe"].__get__(None, STTService)
 
 
+@pytest.fixture(autouse=True)
+def fast_stt_min_interval(monkeypatch):
+    """Overrides STT_MIN_INTERVAL module constant so rate-limiting does not sleep for 1.05s during tests."""
+    monkeypatch.setattr("src.app.services.stt.STT_MIN_INTERVAL", 0.01)
+
+
 def _generate_synthetic_mp3_bytes(duration_sec: float = 10.0) -> bytes:
     """Generates synthetic MP3 audio bytes using PyAV for testing."""
     out_file = io.BytesIO()
@@ -92,7 +98,6 @@ def test_stt_transcribe_429_retry_handling(tmp_path, monkeypatch):
     """Verify HTTP 429 response triggers Retry-After pause and retry."""
     monkeypatch.setattr(STTService, "transcribe", _REAL_TRANSCRIBE)
     monkeypatch.setenv("SARVAM_API_KEY", "test_valid_key_123")
-    monkeypatch.setenv("STT_MIN_INTERVAL", "0.01")
 
     audio_file = tmp_path / "short_audio.mp3"
     audio_file.write_bytes(_generate_synthetic_mp3_bytes(10.0))

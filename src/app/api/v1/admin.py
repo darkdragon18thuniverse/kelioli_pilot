@@ -9,6 +9,7 @@ from src.app.core.constants import (
     DEFAULT_MAX_MONTHLY_MINUTES,
     DEFAULT_MINUTE_GRACE_LIMIT,
     DEFAULT_INFRA_GRACE_DAYS,
+    DEFAULT_TARGET_COMPLIANCE_SCORE,
 )
 
 router = APIRouter(prefix="", tags=["Administration"])
@@ -31,6 +32,7 @@ class OrganizationCreateSchema(BaseModel):
     max_monthly_minutes: float = Field(DEFAULT_MAX_MONTHLY_MINUTES, examples=[500.0])
     minute_grace_limit: float = Field(DEFAULT_MINUTE_GRACE_LIMIT, examples=[20.0])
     infra_grace_days: int = Field(DEFAULT_INFRA_GRACE_DAYS, examples=[7])
+    target_compliance_score: float = Field(DEFAULT_TARGET_COMPLIANCE_SCORE, ge=0, le=100, examples=[85.0])
     status: Optional[str] = Field(None, examples=["active", "suspended", "limit_exceeded"])
 
 
@@ -49,6 +51,7 @@ class OrganizationUpdateSchema(BaseModel):
     max_monthly_minutes: Optional[float] = None
     minute_grace_limit: Optional[float] = None
     infra_grace_days: Optional[int] = None
+    target_compliance_score: Optional[float] = Field(None, ge=0, le=100)
     status: Optional[str] = Field(None, examples=["active", "suspended", "limit_exceeded"])
 
 
@@ -126,6 +129,7 @@ class OrganizationRecordSchema(BaseModel):
     max_monthly_minutes: Optional[float] = Field(DEFAULT_MAX_MONTHLY_MINUTES, examples=[50.0])
     minute_grace_limit: float = Field(DEFAULT_MINUTE_GRACE_LIMIT, examples=[20.0])
     infra_grace_days: int = Field(DEFAULT_INFRA_GRACE_DAYS, examples=[7])
+    target_compliance_score: float = Field(DEFAULT_TARGET_COMPLIANCE_SCORE, examples=[85.0])
     status: str = Field("active", examples=["active"])
 
 
@@ -163,6 +167,118 @@ class UserListResponseSchema(BaseModel):
     users: List[UserRecordSchema]
 
 
+# --- Dashboard ("Performance & Compliance") Response Schemas ---
+class DashboardPeriodSchema(BaseModel):
+    start: str = Field(..., examples=["2026-07-05"])
+    end: str = Field(..., examples=["2026-08-04"])
+    label: str = Field(..., examples=["Last 30 days"])
+
+
+class DashboardKPIsSchema(BaseModel):
+    avg_compliance_score: Optional[float] = Field(None, examples=[71.4])
+    avg_compliance_score_prev: Optional[float] = Field(None, examples=[75.6])
+    critical_failures_count: int = Field(..., examples=[87])
+    critical_failures_count_prev: int = Field(..., examples=[64])
+    critical_failures_rule_count: int = Field(..., examples=[3])
+    critical_failures_agent_count: int = Field(..., examples=[6])
+    agents_below_target_count: int = Field(..., examples=[3])
+    agents_total_count: int = Field(..., examples=[7])
+    agents_unscored_count: int = Field(..., examples=[1])
+    calls_audited_count: int = Field(..., examples=[1284])
+    calls_audited_count_prev: int = Field(..., examples=[1157])
+    minutes_processed: float = Field(..., examples=[1512.3])
+
+
+class ScoreTrendPointSchema(BaseModel):
+    week_label: str = Field(..., examples=["W1"])
+    week_start: str = Field(..., examples=["2026-05-11"])
+    avg_score: Optional[float] = Field(None, examples=[82.1])
+    call_count: int = Field(..., examples=[210])
+
+
+class SeverityBreakdownItemSchema(BaseModel):
+    severity_level: str = Field(..., examples=["critical"])
+    failure_count: int = Field(..., examples=[87])
+    rule_count: int = Field(..., examples=[3])
+    agent_count: int = Field(..., examples=[6])
+
+
+class RuleFailureRateItemSchema(BaseModel):
+    parameter_id: int = Field(..., examples=[12])
+    parameter_name: str = Field(..., examples=["Verify identity before disclosure"])
+    department_id: int = Field(..., examples=[3])
+    department_name: str = Field(..., examples=["Collections"])
+    severity_level: str = Field(..., examples=["critical"])
+    failed_count: int = Field(..., examples=[391])
+    checked_count: int = Field(..., examples=[631])
+    failure_rate: float = Field(..., examples=[61.97])
+    failure_rate_delta: float = Field(..., examples=[12.1])
+
+
+class AgentPerformanceItemSchema(BaseModel):
+    user_id: int = Field(..., examples=[5])
+    name: str = Field(..., examples=["Vinamra Mattoo"])
+    department_id: Optional[int] = Field(None, examples=[2])
+    department_name: Optional[str] = Field(None, examples=["Support"])
+    calls_count: int = Field(..., examples=[218])
+    avg_score: Optional[float] = Field(None, examples=[89.2])
+    critical_count: int = Field(..., examples=[2])
+    is_scored: bool = Field(..., examples=[True])
+
+
+class CriticalFailureFeedItemSchema(BaseModel):
+    call_id: int = Field(..., examples=[991])
+    parameter_name: str = Field(..., examples=["Verify identity before disclosure"])
+    failed_line_text: Optional[str] = Field(None, examples=["I can just tell you the balance now"])
+    failure_offset_seconds: Optional[int] = Field(None, examples=[252])
+    agent_name: Optional[str] = Field(None, examples=["Vinamra Mattoo"])
+    department_name: Optional[str] = Field(None, examples=["Collections"])
+    created_at: Optional[str] = Field(None, examples=["2026-08-03T10:15:00"])
+
+
+class TopicBreakdownItemSchema(BaseModel):
+    topic: str = Field(..., examples=["Refund request"])
+    calls_count: int = Field(..., examples=[312])
+    failure_rate: float = Field(..., examples=[44.2])
+
+
+class DepartmentCoverageItemSchema(BaseModel):
+    department_id: int = Field(..., examples=[1])
+    department_name: str = Field(..., examples=["Collections"])
+    active_rule_count: int = Field(..., examples=[8])
+    agent_count: int = Field(..., examples=[3])
+    calls_count: int = Field(..., examples=[631])
+    avg_score: Optional[float] = Field(None, examples=[76.8])
+    is_covered: bool = Field(..., examples=[True])
+
+
+class TopErrorItemSchema(BaseModel):
+    message: str = Field(..., examples=["Insufficient prepaid balance"])
+    count: int = Field(..., examples=[18])
+
+
+class ProcessingHealthSchema(BaseModel):
+    completed: int = Field(..., examples=[1284])
+    pending: int = Field(..., examples=[23])
+    in_flight: int = Field(..., examples=[6])
+    failed: int = Field(..., examples=[41])
+    top_errors: List[TopErrorItemSchema] = []
+
+
+class DashboardResponseSchema(BaseModel):
+    period: DashboardPeriodSchema
+    target_compliance_score: float = Field(DEFAULT_TARGET_COMPLIANCE_SCORE, examples=[85.0])
+    kpis: DashboardKPIsSchema
+    score_trend: List[ScoreTrendPointSchema]
+    severity_breakdown: List[SeverityBreakdownItemSchema]
+    rules_by_failure_rate: List[RuleFailureRateItemSchema]
+    agent_performance: List[AgentPerformanceItemSchema]
+    critical_failures_feed: List[CriticalFailureFeedItemSchema]
+    topic_breakdown: List[TopicBreakdownItemSchema]
+    department_coverage: List[DepartmentCoverageItemSchema]
+    processing_health: ProcessingHealthSchema
+
+
 # --- Organization Routes ---
 @router.post("/organizations", status_code=status.HTTP_201_CREATED, response_model=StandardResponseSchema)
 def create_organization(
@@ -186,6 +302,7 @@ def create_organization(
         max_monthly_minutes=payload.max_monthly_minutes,
         minute_grace_limit=payload.minute_grace_limit,
         infra_grace_days=payload.infra_grace_days,
+        target_compliance_score=payload.target_compliance_score,
         status_val=payload.status
     )
 
@@ -316,6 +433,23 @@ def update_user(
         current_user=current_user,
         user_id=user_id,
         updates=updates
+    )
+
+
+@router.get("/dashboard", status_code=status.HTTP_200_OK, response_model=DashboardResponseSchema)
+def get_admin_dashboard(
+    period: Optional[Literal["7d", "30d", "90d", "month"]] = Query("30d", description="Reporting window for the dashboard (7d, 30d, 90d, month)"),
+    organization_id: Optional[int] = Query(None, description="Organization ID filter (required for Superadmin)"),
+    start_date: Optional[str] = Query(None, description="Custom start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="Custom end date (YYYY-MM-DD)"),
+    current_user: Dict[str, Any] = Depends(AuthController.get_current_user_context)
+) -> Dict[str, Any]:
+    return AdminController.get_dashboard(
+        current_user=current_user,
+        period=period or "30d",
+        organization_id=organization_id,
+        start_date=start_date,
+        end_date=end_date
     )
 
 

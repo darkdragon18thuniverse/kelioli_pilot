@@ -5,35 +5,18 @@ from src.app.models.base import DatabaseManager
 
 class Billing:
     """
-    Handles immutable monthly accounting closures and time-series performance aggregations.
-    """
+    Time-series usage aggregation, plus READ-ONLY access to legacy postpaid
+    billing snapshots.
 
-    @staticmethod
-    def create_snapshot(
-        organization_id: int,
-        tier_at_billing: str,
-        infra_fixed_cost_charged: float,
-        per_minute_cost_charged: float,
-        total_minutes_consumed: float,
-        total_spend_calculated: float,
-        billing_period_start: str,
-        billing_period_end: str,
-        payment_status: str = "unpaid"
-    ) -> int:
-        """Creates an immutable billing snapshot record."""
-        insert_query = """
-            INSERT INTO billing_snapshots (
-                organization_id, tier_at_billing, infra_fixed_cost_charged,
-                per_minute_cost_charged, total_minutes_consumed, total_spend_calculated,
-                billing_period_start, billing_period_end, payment_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """
-        params = (
-            organization_id, tier_at_billing, infra_fixed_cost_charged,
-            per_minute_cost_charged, total_minutes_consumed, total_spend_calculated,
-            billing_period_start, billing_period_end, payment_status
-        )
-        return DatabaseManager.execute_update(insert_query, params)
+    Snapshots belong to the retired postpaid model: usage accrued through the
+    month and a worker froze an invoice at month end. Prepaid replaced that
+    entirely — money now moves through prepaid_recharges and minute_ledger.
+    Every snapshot write path (create_snapshot, log_monthly_snapshot,
+    update_snapshot_payment_status) and the generating worker have been removed;
+    the table and the GET routes remain purely as historical record.
+
+    Do not reintroduce a snapshot write path. Charging belongs to Prepaid.
+    """
 
     @staticmethod
     def get_snapshot_by_id(snapshot_id: int) -> Optional[sqlite3.Row]:
@@ -54,12 +37,6 @@ class Billing:
         return DatabaseManager.execute_query(query, tuple(params))
 
     @staticmethod
-    def update_snapshot_payment_status(snapshot_id: int, payment_status: str) -> bool:
-        """Updates the payment_status of a specific billing snapshot."""
-        query = "UPDATE billing_snapshots SET payment_status = ? WHERE id = ?;"
-        return DatabaseManager.execute_update(query, (payment_status, snapshot_id)) > 0
-
-    @staticmethod
     def sync_daily_metrics_for_call(call_id: int) -> None:
         """
         Auto-populates daily_usage_metrics when a call completes or fails.
@@ -76,10 +53,30 @@ class Billing:
         user_id = call["user_id"]
         usage_date = call["usage_date"]
 
+        # total_minutes counts a call only if it actually produced a transcript.
+        #
+        # This is the single billability rule, and it must stay identical to the
+        # one Prepaid.debit_call is driven by (see calls_controller) so reported
+        # usage and charged minutes never disagree:
+        #
+        #   transcript present -> STT ran and cost us money -> billable, even if
+        #       the LLM step later threw and the call is marked 'failed'.
+        #   transcript empty   -> no upstream API produced anything (blank STT
+        #       result, audio that never resolved, a call blocked at pickup)
+        #       -> not billable.
+        #
+        # Note this is deliberately NOT "processing_status = 'completed'". The
+        # call still shows up in total_calls_failed either way — a blank-transcript
+        # call remains visible as an attempt, it just contributes zero minutes.
+        # SQLite's 1-arg TRIM() strips spaces ONLY — a transcript of "\n" would
+        # survive it and be billed. The explicit character set makes this match
+        # Python's str.strip(), which is what the pipeline's own blank check uses.
+        _WHITESPACE = "' ' || char(9) || char(10) || char(13)"
+        _BILLABLE = f"transcript IS NOT NULL AND TRIM(transcript, {_WHITESPACE}) != ''"
         if user_id is not None:
-            agg_query = """
-                SELECT 
-                    COALESCE(SUM(duration_seconds), 0.0) / 60.0 AS total_minutes,
+            agg_query = f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN {_BILLABLE} THEN duration_seconds ELSE 0.0 END), 0.0) / 60.0 AS total_minutes,
                     SUM(CASE WHEN processing_status = 'completed' THEN 1 ELSE 0 END) AS total_calls_processed,
                     SUM(CASE WHEN processing_status = 'failed' THEN 1 ELSE 0 END) AS total_calls_failed
                 FROM calls
@@ -89,9 +86,9 @@ class Billing:
             check_query = "SELECT id FROM daily_usage_metrics WHERE organization_id = ? AND department_id = ? AND user_id = ? AND usage_date = ?;"
             check_params = (org_id, dept_id, user_id, usage_date)
         else:
-            agg_query = """
-                SELECT 
-                    COALESCE(SUM(duration_seconds), 0.0) / 60.0 AS total_minutes,
+            agg_query = f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN {_BILLABLE} THEN duration_seconds ELSE 0.0 END), 0.0) / 60.0 AS total_minutes,
                     SUM(CASE WHEN processing_status = 'completed' THEN 1 ELSE 0 END) AS total_calls_processed,
                     SUM(CASE WHEN processing_status = 'failed' THEN 1 ELSE 0 END) AS total_calls_failed
                 FROM calls
@@ -127,23 +124,6 @@ class Billing:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?);
             """
             DatabaseManager.execute_update(insert_query, (org_id, dept_id, user_id, usage_date, total_minutes, total_calls_processed, total_calls_failed))
-
-    @staticmethod
-    def log_monthly_snapshot(organization_id: int, tier_at_billing: str, infra_fixed_cost_charged: float,
-                             per_minute_cost_charged: float, total_minutes_consumed: float,
-                             total_spend_calculated: float, start_date: str, end_date: str) -> int:
-        """Locks in an immutable historical billing summary record at the end of a cycle."""
-        insert_query = """
-            INSERT INTO billing_snapshots (
-                organization_id, tier_at_billing, infra_fixed_cost_charged,
-                per_minute_cost_charged, total_minutes_consumed, total_spend_calculated,
-                billing_period_start, billing_period_end, payment_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unpaid');
-        """
-        params = (organization_id, tier_at_billing, infra_fixed_cost_charged,
-                  per_minute_cost_charged, total_minutes_consumed, total_spend_calculated,
-                  start_date, end_date)
-        return DatabaseManager.execute_update(insert_query, params)
 
     @staticmethod
     def refresh_daily_metrics(organization_id: int, department_id: int, user_id: Optional[int],
@@ -205,37 +185,6 @@ class Billing:
         query += " ORDER BY usage_date ASC, id ASC;"
         return DatabaseManager.execute_query(query, tuple(params))
 
-    @staticmethod
-    def snapshot_exists(organization_id: int, billing_period_start: str, billing_period_end: str) -> bool:
-        """Checks if a billing snapshot already exists for the given organization and period."""
-        query = """
-            SELECT 1 FROM billing_snapshots
-            WHERE organization_id = ? AND billing_period_start = ? AND billing_period_end = ?
-            LIMIT 1;
-        """
-        rows = DatabaseManager.execute_query(query, (organization_id, billing_period_start, billing_period_end))
-        return len(rows) > 0
-
-    @staticmethod
-    def get_usage_total_for_period(organization_id: int, billing_period_start: str, billing_period_end: str) -> float:
-        """Sums total_minutes from daily_usage_metrics for an org across a specific date range (inclusive)."""
-        query = """
-            SELECT COALESCE(SUM(total_minutes), 0.0) AS total_minutes
-            FROM daily_usage_metrics
-            WHERE organization_id = ? AND usage_date >= ? AND usage_date <= ?;
-        """
-        rows = DatabaseManager.execute_query(query, (organization_id, billing_period_start, billing_period_end))
-        if not rows:
-            return 0.0
-        return round(float(rows[0]["total_minutes"] or 0.0), 2)
-
-    @staticmethod
-    def list_unbilled_usage_months(before_date: str) -> List[sqlite3.Row]:
-        """Lists distinct (organization_id, year_month) tuples from daily_usage_metrics prior to before_date."""
-        query = """
-            SELECT DISTINCT organization_id, strftime('%Y-%m', usage_date) AS year_month
-            FROM daily_usage_metrics
-            WHERE usage_date < ?
-            ORDER BY year_month ASC, organization_id ASC;
-        """
-        return DatabaseManager.execute_query(query, (before_date,))
+    # snapshot_exists / get_usage_total_for_period / list_unbilled_usage_months
+    # existed solely to drive the retired monthly snapshot worker and have been
+    # removed along with it.

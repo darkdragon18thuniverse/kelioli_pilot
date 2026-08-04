@@ -69,6 +69,8 @@ def init_database() -> None:
             cursor.execute("ALTER TABLE organizations ADD COLUMN minute_grace_limit REAL NOT NULL DEFAULT 20.0;")
         if "infra_grace_days" not in org_cols:
             cursor.execute("ALTER TABLE organizations ADD COLUMN infra_grace_days INTEGER NOT NULL DEFAULT 7;")
+        if "target_compliance_score" not in org_cols:
+            cursor.execute("ALTER TABLE organizations ADD COLUMN target_compliance_score REAL NOT NULL DEFAULT 85.0;")
         conn.commit()
         logger.info("Database schema initialized and bootstrapped successfully.")
     except sqlite3.Error as e:

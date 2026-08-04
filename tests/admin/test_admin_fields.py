@@ -1,6 +1,7 @@
 import pytest
 from src.app.models.user import User
 from src.app.models.organization import Organization
+from src.app.core.database import init_database
 
 
 @pytest.fixture(autouse=True)
@@ -110,3 +111,78 @@ def test_get_nonexistent_user_404(client):
         headers={"Authorization": f"Bearer {token}"}
     )
     assert res.status_code == 404
+
+
+# --- 🟡 target_compliance_score: create/update round-trip + migration idempotency ---
+
+def test_organization_create_default_target_compliance_score(client):
+    """Creating an org without specifying target_compliance_score defaults to 85.0."""
+    token = get_superadmin_token(client)
+    res = client.post(
+        "/api/v1/admin/organizations",
+        json={"name": "Default Target Org", "slug": "default-target-org"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert res.status_code == 201
+    org_id = res.json()["id"]
+    org_db = Organization.get_by_id(org_id)
+    assert org_db["target_compliance_score"] == 85.0
+
+
+def test_organization_create_and_update_custom_target_compliance_score(client):
+    """Superadmin can set a custom target_compliance_score at create time, and change it via update."""
+    token = get_superadmin_token(client)
+
+    res_create = client.post(
+        "/api/v1/admin/organizations",
+        json={
+            "name": "Custom Target Org",
+            "slug": "custom-target-org",
+            "target_compliance_score": 92.5
+        },
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert res_create.status_code == 201
+    org_id = res_create.json()["id"]
+    org_db = Organization.get_by_id(org_id)
+    assert org_db["target_compliance_score"] == 92.5
+
+    res_update = client.put(
+        f"/api/v1/admin/organizations/{org_id}",
+        json={"target_compliance_score": 70.0},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert res_update.status_code == 200
+    org_db_updated = Organization.get_by_id(org_id)
+    assert org_db_updated["target_compliance_score"] == 70.0
+
+
+def test_organization_create_target_compliance_score_out_of_bounds_rejected(client):
+    """target_compliance_score outside [0, 100] is rejected with 422."""
+    token = get_superadmin_token(client)
+    res = client.post(
+        "/api/v1/admin/organizations",
+        json={
+            "name": "Bad Target Org",
+            "slug": "bad-target-org",
+            "target_compliance_score": 150.0
+        },
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert res.status_code == 422
+
+
+def test_target_compliance_score_migration_idempotent_on_populated_db():
+    """Running init_database() twice against a DB that already has organizations
+    with a non-default target_compliance_score must not error and must not
+    overwrite the existing value (mirrors the llm_provider/prepaid migration tests)."""
+    org_id = Organization.create(
+        name="Migration Target Org", slug="migration-target-org",
+        target_compliance_score=77.0
+    )
+
+    init_database()
+    init_database()
+
+    org_row = Organization.get_by_id(org_id)
+    assert org_row["target_compliance_score"] == 77.0

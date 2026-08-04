@@ -109,15 +109,11 @@ def process_next_pending_call() -> bool:
         logger.info(f"Worker successfully completed evaluation for call_id={call_id}")
     except Exception as e:
         logger.exception(f"Worker: Pipeline execution failed for call_id={call_id}: {e}")
-        Call.update_evaluation_results(
-            call_id=call_id,
-            transcript="",
-            total_checked=0,
-            total_passed=0,
-            compliance_score_percentage=None,
-            processing_status="failed",
-            error_message=str(e)
-        )
+        # mark_failed deliberately preserves transcript and duration_seconds. If
+        # STT already succeeded and the LLM step is what threw, those fields are
+        # the record of work we were billed for upstream and already debited the
+        # org for — blanking them here would desync usage from the ledger.
+        Call.mark_failed(call_id=call_id, error_message=str(e))
     finally:
         # Clean up temporary downloaded remote file or local uploaded file in temp_audio
         if is_temp and resolved_path and os.path.exists(resolved_path):

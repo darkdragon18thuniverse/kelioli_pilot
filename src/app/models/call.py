@@ -29,6 +29,37 @@ class Call:
         return rows[0] if rows else None
 
     @staticmethod
+    def mark_failed(call_id: int, error_message: str) -> bool:
+        """
+        Marks a call failed WITHOUT touching transcript or duration_seconds.
+
+        Use this for pipeline crashes. Calling update_evaluation_results with
+        transcript="" (its old behaviour here) blanked the transcript and reset
+        duration_seconds to its 0.0 default, which destroyed the two fields that
+        decide whether the call was billable — a call whose STT succeeded and
+        whose LLM then threw would look identical to one where nothing ran at
+        all, and the minutes we had already been charged for by the STT provider
+        would silently vanish from usage.
+        """
+        query = """
+            UPDATE calls SET
+                processing_status = 'failed',
+                error_message = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?;
+        """
+        updated = DatabaseManager.execute_update(query, (error_message, call_id)) > 0
+        if updated:
+            from src.app.models.billing import Billing
+            Billing.sync_daily_metrics_for_call(call_id)
+
+            call_row = Call.get_by_id(call_id)
+            if call_row and call_row["csv_upload_id"]:
+                from src.app.models.csv_upload import CSVUpload
+                CSVUpload.sync_upload_stats(call_row["csv_upload_id"])
+        return updated
+
+    @staticmethod
     def update_evaluation_results(call_id: int, transcript: str, total_checked: int,
                                   total_passed: int, compliance_score_percentage: Optional[float],
                                   duration_seconds: float = 0.0,
@@ -77,7 +108,9 @@ class Call:
 
     @staticmethod
     def list_calls(organization_id: int, department_id: Optional[int] = None,
-                   user_id: Optional[int] = None, status_filter: Optional[str] = None) -> List[sqlite3.Row]:
+                   user_id: Optional[int] = None, status_filter: Optional[str] = None,
+                   start_date: Optional[str] = None, end_date: Optional[str] = None,
+                   search: Optional[str] = None) -> List[sqlite3.Row]:
         query = "SELECT * FROM calls WHERE organization_id = ?"
         params = [organization_id]
 
@@ -90,6 +123,16 @@ class Call:
         if status_filter:
             query += " AND processing_status = ?"
             params.append(status_filter)
+        if start_date:
+            query += " AND created_at >= ?"
+            params.append(f"{start_date.strip()} 00:00:00")
+        if end_date:
+            query += " AND created_at <= ?"
+            params.append(f"{end_date.strip()} 23:59:59")
+        if search and search.strip():
+            search_pattern = f"%{search.strip()}%"
+            query += " AND (procedure_enquired LIKE ? OR transcript LIKE ?)"
+            params.extend([search_pattern, search_pattern])
 
         query += " ORDER BY id DESC;"
         return DatabaseManager.execute_query(query, tuple(params))

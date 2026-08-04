@@ -59,9 +59,11 @@ def startup_event():
         from src.app.services.db_backup_worker import run_db_backup_worker
         logger.info("Starting background call queue worker thread.")
         threading.Thread(target=run_worker, daemon=True).start()
-        # billing_snapshot_worker is retired under prepaid billing (§2.5) — the
-        # module and its tests are left in place, but it is no longer launched.
-        # Legacy postpaid snapshots become read-only history (GET-only routes).
+        # No billing worker runs here. Postpaid monthly snapshots are retired
+        # under prepaid billing (§2.5): charging happens per-call against the
+        # minute ledger, so there is nothing to close out at month end. The
+        # snapshot worker and every snapshot write path have been deleted;
+        # billing_snapshots survives only as read-only history behind GET routes.
         logger.info("Starting background DB backup worker thread.")
         threading.Thread(target=run_db_backup_worker, daemon=True).start()
 

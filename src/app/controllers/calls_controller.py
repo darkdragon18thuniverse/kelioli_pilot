@@ -230,6 +230,23 @@ class CallsController:
                 "error_message": err_msg
             }
 
+        # Debit as soon as a usable transcript exists — NOT at the end of the
+        # pipeline. STT has already run and already cost us money at this point,
+        # so the call is billable regardless of what the LLM step does next. If
+        # LLMService.evaluate() raises below, the exception unwinds to the queue
+        # worker's handler and the call is marked 'failed', but the minutes stay
+        # correctly debited. Doing this at the end of the pipeline instead meant
+        # every LLM failure was served for free.
+        #
+        # Idempotent via minute_ledger's unique index on call_id, so re-entering
+        # the pipeline for the same call cannot double-charge. The billability
+        # rule here is deliberately identical to _BILLABLE in
+        # Billing.sync_daily_metrics_for_call — change one, change both.
+        billable_minutes = round(duration_seconds / 60.0, 2)
+        if billable_minutes <= 0.0:
+            billable_minutes = MINIMUM_BILLABLE_MINUTES
+        Prepaid.debit_call(organization_id=org["id"], call_id=call_id, minutes=billable_minutes)
+
         raw_params = ComplianceParameter.list_by_department(org["id"], dept["id"])
         active_params = [dict(p) for p in raw_params if p["is_active"] == 1] if raw_params else []
         logger.info(f"Pipeline Execution: Running LLM evaluation against {len(active_params)} active compliance parameters for call_id={call_id}")
@@ -307,14 +324,8 @@ class CallsController:
             transcript_chunks=chunks_json
         )
 
-        # Debit on completion, next to sync_daily_metrics_for_call (which
-        # Call.update_evaluation_results already triggers above). Failed calls
-        # are never charged — this only runs on the success path. Idempotent
-        # via minute_ledger's unique index on call_id (Prepaid.debit_call).
-        billable_minutes = round(duration_seconds / 60.0, 2)
-        if billable_minutes <= 0.0:
-            billable_minutes = MINIMUM_BILLABLE_MINUTES
-        Prepaid.debit_call(organization_id=org["id"], call_id=call_id, minutes=billable_minutes)
+        # NOTE: the usage debit already happened above, immediately after the
+        # transcript was obtained. Nothing to charge here.
 
         return {
             "procedure_enquired": procedure_enquired,
@@ -323,9 +334,12 @@ class CallsController:
 
     @staticmethod
     def list_calls(current_user: Dict[str, Any], organization_id: Optional[int] = None,
-                    department_id: Optional[int] = None) -> Dict[str, Any]:
+                    department_id: Optional[int] = None,
+                    start_date: Optional[str] = None,
+                    end_date: Optional[str] = None,
+                    search: Optional[str] = None) -> Dict[str, Any]:
         """
-        Lists calls with RBAC tenant/department/self scoping.
+        Lists calls with RBAC tenant/department/self scoping and optional date/search filtering.
         """
         CallsController._verify_role(current_user, [ROLES["superadmin"], ROLES["admin"], ROLES["manager"], ROLES["agent"]])
         effective_org_id = organization_id
@@ -343,7 +357,10 @@ class CallsController:
         rows = Call.list_calls(
             organization_id=effective_org_id,
             department_id=effective_dept_id,
-            user_id=current_user["id"] if current_user["role_id"] == ROLES["agent"] else None
+            user_id=current_user["id"] if current_user["role_id"] == ROLES["agent"] else None,
+            start_date=start_date,
+            end_date=end_date,
+            search=search
         )
         calls = [dict(r) for r in rows] if rows else []
         if calls:

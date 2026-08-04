@@ -43,10 +43,11 @@ CREATE TABLE IF NOT EXISTS organizations (
     default_language TEXT DEFAULT NULL,
     
     -- Pricing & Safeguard Boundaries
-    per_minute_cost REAL NOT NULL DEFAULT 0.0,   
-    infra_fixed_cost REAL NOT NULL DEFAULT 0.0,  
-    max_monthly_minutes REAL DEFAULT 50.0,       
-    
+    per_minute_cost REAL NOT NULL DEFAULT 0.0,
+    infra_fixed_cost REAL NOT NULL DEFAULT 0.0,
+    max_monthly_minutes REAL DEFAULT 50.0,
+    target_compliance_score REAL NOT NULL DEFAULT 85.0,
+
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -275,6 +276,13 @@ CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(processing_status);
 CREATE INDEX IF NOT EXISTS idx_evaluations_call_id ON call_evaluations(call_id);
 CREATE INDEX IF NOT EXISTS idx_daily_metrics_lookup ON daily_usage_metrics(organization_id, usage_date);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_csv_uploads_org_hash ON csv_uploads(organization_id, file_hash);
+
+-- Org-admin dashboard aggregation support (additive, safe on a live DB)
+CREATE INDEX IF NOT EXISTS idx_evaluations_parameter_id ON call_evaluations(parameter_id);
+CREATE INDEX IF NOT EXISTS idx_calls_department  ON calls(department_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_params_org_dept   ON compliance_parameters(organization_id, department_id);
+CREATE INDEX IF NOT EXISTS idx_users_org         ON users(organization_id);
+CREATE INDEX IF NOT EXISTS idx_users_department  ON users(department_id);
 
 -- ==========================================
 -- 7. AUTOMATIC UPDATED_AT TIMESTAMP TRIGGERS
