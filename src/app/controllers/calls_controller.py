@@ -738,21 +738,28 @@ class CallsController:
                 logger.info(f"Superadmin Reprocess [{mode}]: Transcribing call_id={call_id} using STT model '{effective_stt_model}'")
                 stt_result = STTService.transcribe(audio_target_path)
                 transcript = stt_result.get("transcript", "")
+                transcript_chunks = stt_result.get("transcript_chunks", [])
                 stt_model_used = stt_result.get("model_used", effective_stt_model)
 
                 # Persist the transcript immediately, before any LLM evaluation is
                 # attempted. STT is billable work; if the LLM step below fails
                 # (e.g. provider quota exhaustion) we must not discard it.
                 from src.app.models.base import DatabaseManager
+                chunks_json = json.dumps(transcript_chunks) if transcript_chunks else None
                 DatabaseManager.execute_update(
                     """
-                    UPDATE calls SET transcript = ?, runtime_stt_model = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;
+                    UPDATE calls SET transcript = ?, transcript_chunks = ?, runtime_stt_model = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;
                     """,
-                    (transcript, stt_model_used, call_id)
+                    (transcript, chunks_json, stt_model_used, call_id)
                 )
             else:
                 transcript = call_dict.get("transcript", "")
                 stt_model_used = call_dict.get("runtime_stt_model")
+                tc_raw = call_dict.get("transcript_chunks")
+                try:
+                    transcript_chunks = json.loads(tc_raw) if tc_raw else []
+                except Exception:
+                    transcript_chunks = []
 
             if not transcript or not transcript.strip():
                 err_msg = "Transcription is blank or empty"
@@ -825,13 +832,16 @@ class CallsController:
                 for item in eval_items:
                     param_match = next((p for p in active_params if p["id"] == item["parameter_id"]), None)
                     snapshot_text = param_match["rule_description"] if param_match else ""
+                    did_follow = item.get("did_follow_rule", 1)
+                    failed_line = item.get("failed_line_text")
+                    offset_sec = CallsController._match_failed_line_offset(failed_line, transcript_chunks) if did_follow == 0 else None
                     evaluations_to_save.append({
                         "call_id": call_id,
                         "parameter_id": item["parameter_id"],
-                        "did_follow_rule": item["did_follow_rule"],
-                        "failure_offset_seconds": None,
+                        "did_follow_rule": did_follow,
+                        "failure_offset_seconds": offset_sec,
                         "failure_reason": item.get("failure_reason"),
-                        "failed_line_text": item.get("failed_line_text"),
+                        "failed_line_text": failed_line,
                         "parameter_snapshot_text": snapshot_text
                     })
 
@@ -841,6 +851,7 @@ class CallsController:
                 completion_tokens = evaluation_result.get("completion_tokens", call_dict.get("upstream_tokens_completion", 0))
                 llm_model_used = evaluation_result.get("model_used", effective_llm_model)
 
+                chunks_json = json.dumps(transcript_chunks) if transcript_chunks else None
                 Call.update_evaluation_results(
                     call_id=call_id,
                     transcript=transcript,
@@ -853,16 +864,18 @@ class CallsController:
                     upstream_tokens_completion=completion_tokens,
                     runtime_stt_model=stt_model_used,
                     runtime_llm_model=llm_model_used,
-                    processing_status="completed"
+                    processing_status="completed",
+                    transcript_chunks=chunks_json
                 )
             else:
                 # STT-only reprocess: update transcript and STT model without wiping evaluations
                 from src.app.models.base import DatabaseManager
+                chunks_json = json.dumps(transcript_chunks) if transcript_chunks else None
                 DatabaseManager.execute_update(
                     """
-                    UPDATE calls SET transcript = ?, runtime_stt_model = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;
+                    UPDATE calls SET transcript = ?, transcript_chunks = ?, runtime_stt_model = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;
                     """,
-                    (transcript, stt_model_used, call_id)
+                    (transcript, chunks_json, stt_model_used, call_id)
                 )
 
             updated_call = Call.get_by_id(call_id)
