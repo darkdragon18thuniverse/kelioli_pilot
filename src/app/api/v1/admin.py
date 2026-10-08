@@ -23,7 +23,7 @@ class OrganizationCreateSchema(BaseModel):
     tier: str = Field("free", examples=["growth"])
     company_context: Optional[str] = Field(None, examples=["We provide remote medical consultations."])
     stt_model_routing: Optional[str] = Field(None, examples=["sarvam-2"])
-    llm_provider: Optional[Literal["openrouter", "gemini"]] = Field("openrouter", examples=["openrouter", "gemini"])
+    llm_provider: Optional[Literal["openrouter", "gemini", "agy"]] = Field("openrouter", examples=["openrouter", "gemini", "agy"])
     llm_model_routing: Optional[str] = Field(None, examples=["openrouter/free"])
     call_eval_effort: Optional[Literal["minimal", "low", "medium", "high"]] = Field("medium", examples=["medium"])
     default_language: Optional[str] = Field(None, examples=["en-IN"])
@@ -42,7 +42,7 @@ class OrganizationUpdateSchema(BaseModel):
     tier: Optional[str] = None
     company_context: Optional[str] = None
     stt_model_routing: Optional[str] = None
-    llm_provider: Optional[Literal["openrouter", "gemini"]] = None
+    llm_provider: Optional[Literal["openrouter", "gemini", "agy"]] = None
     llm_model_routing: Optional[str] = None
     call_eval_effort: Optional[Literal["minimal", "low", "medium", "high"]] = None
     default_language: Optional[str] = None

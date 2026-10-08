@@ -104,7 +104,7 @@ class CallReprocessRequestSchema(BaseModel):
     mode: Literal["full", "transcription", "llm"] = "full"
     department_id: Optional[int] = None
     stt_model: Optional[str] = None
-    llm_provider: Optional[Literal["openrouter", "gemini"]] = None
+    llm_provider: Optional[Literal["openrouter", "gemini", "agy"]] = None
     llm_model: Optional[str] = None
     llm_effort: Optional[Literal["minimal", "low", "medium", "high"]] = None
 
@@ -114,7 +114,7 @@ class CallBatchReprocessRequestSchema(BaseModel):
     mode: Literal["full", "transcription", "llm"] = "full"
     department_id: Optional[int] = None
     stt_model: Optional[str] = None
-    llm_provider: Optional[Literal["openrouter", "gemini"]] = None
+    llm_provider: Optional[Literal["openrouter", "gemini", "agy"]] = None
     llm_model: Optional[str] = None
     llm_effort: Optional[Literal["minimal", "low", "medium", "high"]] = None
 

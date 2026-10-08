@@ -98,6 +98,11 @@ if OPENROUTER_DATA_COLLECTION not in ("deny", "allow"):
 # materially shrinks the provider pool; enable once routing is confirmed stable.
 OPENROUTER_REQUIRE_ZDR = os.getenv("OPENROUTER_REQUIRE_ZDR", "false").lower() in ("1", "true", "yes")
 
+# --- AGY Curigon (OpenAI-compatible gateway) ---
+AGY_BASE_URL = os.getenv("AGY_BASE_URL", "https://agy.curigon.com/v1")
+# Families the gateway serves as "<family>-low|medium|high" variants.
+AGY_EFFORT_MODEL_FAMILIES = {"gemini-3.8-flash", "gemini-3.8"}
+
 # NOTE: rate limiting state must be shared across ALL gunicorn worker processes,
 # not just threads within one process, otherwise the effective request rate is
 # multiplied by the worker count. State is therefore kept in SQLite
@@ -585,6 +590,55 @@ class LLMService:
                     if completion_count or thoughts_count:
                         usage_info["completion_tokens"] = completion_count + thoughts_count
             return "".join(chunks), usage_info
+
+        elif provider == "agy":
+            # AGY Curigon: an OpenAI-compatible gateway. It encodes thinking
+            # effort in the model id ("gemini-3.8-flash-medium"), so for the
+            # model families that offer effort variants the org's effort setting
+            # is appended as a suffix; every other model id is sent as-is.
+            # "default" (or no model) defers to AGY_MODEL in the environment.
+            key = api_key or os.getenv("AGY_API_KEY")
+            if not key or key == "mock_key":
+                logger.warning("AGY LLM is not configured with a valid live production key.")
+                raise ValueError("LLM is not configured with a valid live production key.")
+
+            base_model = selected_model
+            if not base_model or base_model in ("default", "openrouter/free"):
+                base_model = os.getenv("AGY_MODEL", "gemini-3.8-flash")
+            agy_effort_map = {"minimal": "low", "low": "low", "medium": "medium", "high": "high"}
+            if base_model in AGY_EFFORT_MODEL_FAMILIES:
+                base_model = f"{base_model}-{agy_effort_map.get(effort_val.lower(), 'medium')}"
+
+            url = f"{AGY_BASE_URL.rstrip('/')}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": base_model,
+                "messages": messages,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_name,
+                        "strict": True,
+                        "schema": schema_to_use
+                    }
+                }
+            }
+            with httpx.Client(timeout=120.0) as client:
+                res = client.post(url, headers=headers, json=payload)
+                if res.status_code >= 400:
+                    logger.error(f"AGY LLM HTTP {res.status_code} Error: {res.text}")
+                res.raise_for_status()
+                response_data = res.json()
+                usage = response_data.get("usage") or {}
+                usage_info = {
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "model_used": response_data.get("model", base_model)
+                }
+                return response_data["choices"][0]["message"]["content"], usage_info
 
         else:  # openrouter branch (default)
             key = api_key or os.getenv("OPENROUTER_API_KEY")

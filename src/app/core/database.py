@@ -62,7 +62,21 @@ def init_database() -> None:
         cursor.execute("PRAGMA table_info(organizations)")
         org_cols = [r["name"] for r in cursor.fetchall()]
         if "llm_provider" not in org_cols:
-            cursor.execute("ALTER TABLE organizations ADD COLUMN llm_provider TEXT NOT NULL DEFAULT 'openrouter' CHECK (llm_provider IN ('openrouter','gemini'));")
+            cursor.execute("ALTER TABLE organizations ADD COLUMN llm_provider TEXT NOT NULL DEFAULT 'openrouter' CHECK (llm_provider IN ('openrouter','gemini','agy'));")
+        # Widen the llm_provider CHECK on databases created before 'agy' existed.
+        # SQLite cannot ALTER a CHECK constraint, so the stored table definition
+        # is rewritten in place (the documented writable_schema procedure).
+        old_check = "llm_provider IN ('openrouter','gemini')"
+        org_sql = cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='organizations';").fetchone()["sql"]
+        if old_check in org_sql:
+            schema_version = cursor.execute("PRAGMA schema_version;").fetchone()[0]
+            cursor.execute("PRAGMA writable_schema = ON;")
+            cursor.execute(
+                "UPDATE sqlite_master SET sql = ? WHERE type='table' AND name='organizations';",
+                (org_sql.replace(old_check, "llm_provider IN ('openrouter','gemini','agy')"),)
+            )
+            cursor.execute(f"PRAGMA schema_version = {schema_version + 1};")
+            cursor.execute("PRAGMA writable_schema = OFF;")
         if "call_eval_effort" not in org_cols:
             cursor.execute("ALTER TABLE organizations ADD COLUMN call_eval_effort TEXT NOT NULL DEFAULT 'medium' CHECK (call_eval_effort IN ('minimal','low','medium','high'));")
         if "minute_grace_limit" not in org_cols:
